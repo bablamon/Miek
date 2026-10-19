@@ -1,0 +1,28 @@
+[package]
+name = "miek"
+version = "0.3.0"
+edition = "2021"
+description = "Miek — lossless music player"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "blocking"] }
+symphonia = { version = "0.6.1", features = ["all", "opt-simd"] }
+cpal = "0.18.2"
+rubato = "5.0.1"
+ringbuf = "0.5.3"
+lofty = "0.25.4"
+walkdir = "2.5.0"
+tauri-plugin-dialog = "2.8.3"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

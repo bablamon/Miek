@@ -1,0 +1,13 @@
+{
+  "name": "miek",
+  "private": true,
+  "version": "0.3.0",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build --no-bundle",
+    "icon": "tauri icon icon.svg"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

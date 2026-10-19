@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Miek</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="backdrop"><img id="backdrop-art" alt="" /></div>
+
+  <header id="titlebar" data-tauri-drag-region>
+    <div class="brand" data-tauri-drag-region><span class="mark logo-slot" data-tauri-drag-region></span><span class="wordmark" data-tauri-drag-region>miek</span></div>
+    <div class="nav-arrows">
+      <button id="back" class="ibtn" title="Back" data-icon="chevronLeft"></button>
+      <button id="fwd" class="ibtn" title="Forward" data-icon="chevronRight"></button>
+    </div>
+    <label class="search">
+      <span data-icon="search"></span>
+      <input id="search" type="search" placeholder="Search your music and the Internet Archive" autocomplete="off" spellcheck="false" />
+      <kbd>Ctrl L</kbd>
+    </label>
+    <div class="spacer" data-tauri-drag-region></div>
+    <div class="winctl">
+      <button id="win-min" title="Minimize" data-icon="minus"></button>
+      <button id="win-max" title="Maximize" data-icon="square"></button>
+      <button id="win-close" class="close" title="Close" data-icon="x"></button>
+    </div>
+  </header>
+
+  <div id="shell">
+    <aside id="sidebar" class="glass">
+      <nav>
+        <button class="nav" data-route="home"><span data-icon="home"></span>Home</button>
+        <button class="nav" data-route="explore"><span data-icon="globe"></span>Explore</button>
+        <button class="nav" data-route="library"><span data-icon="folder"></span>Your music</button>
+        <button class="nav" data-route="liked"><span data-icon="heart"></span>Liked songs</button>
+      </nav>
+      <div class="side-head">
+        <span>Playlists</span>
+        <button id="new-playlist" class="ibtn sm" title="New playlist" data-icon="plus"></button>
+      </div>
+      <div id="playlists"></div>
+      <button class="nav settings-link" data-route="settings"><span data-icon="settings"></span>Settings</button>
+    </aside>
+
+    <main id="main" class="glass">
+      <section id="view"></section>
+    </main>
+
+    <aside id="queue" class="glass hidden">
+      <div class="queue-head"><span>Up next</span><button id="queue-close" class="ibtn sm" data-icon="x"></button></div>
+      <div id="queue-list"></div>
+    </aside>
+  </div>
+
+  <footer id="player" class="glass">
+    <div class="np">
+      <div class="np-art"><img id="np-cover" alt="" /></div>
+      <div class="np-text">
+        <div id="np-title"></div>
+        <div id="np-artist"></div>
+      </div>
+      <button id="np-like" class="ibtn" title="Like" data-icon="heart"></button>
+    </div>
+    <div class="transport">
+      <div class="buttons">
+        <button id="shuffle" class="ibtn" title="Shuffle" data-icon="shuffle"></button>
+        <button id="prev" class="ibtn lg" title="Previous" data-icon="skipBack"></button>
+        <button id="play" class="playbtn" title="Play" data-icon="play"></button>
+        <button id="next" class="ibtn lg" title="Next" data-icon="skipForward"></button>
+        <button id="repeat" class="ibtn" title="Repeat" data-icon="repeat"></button>
+      </div>
+      <div class="seek">
+        <span id="pos">0:00</span>
+        <input id="seek" type="range" min="0" max="1000" value="0" />
+        <span id="dur">0:00</span>
+      </div>
+    </div>
+    <div class="extras">
+      <button id="quality" class="tag hidden" title="Source format → output"></button>
+      <button id="queue-btn" class="ibtn" title="Up next" data-icon="queue"></button>
+      <button id="mute" class="ibtn" title="Mute" data-icon="volume"></button>
+      <input id="volume" type="range" min="0" max="100" value="80" />
+    </div>
+  </footer>
+
+  <div id="intro" class="hidden">
+    <div class="intro-stage">
+      <div class="intro-ring"></div>
+      <div class="intro-logo logo-slot"></div>
+    </div>
+    <div class="intro-word">miek</div>
+    <div class="intro-hint">click to skip</div>
+  </div>
+
+  <div id="menu" class="glass-solid hidden"></div>
+  <div id="modal" class="hidden"></div>
+  <div id="toast" class="hidden"></div>
+
+  <script src="icons.js"></script>
+  <script src="intro.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
