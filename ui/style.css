@@ -361,3 +361,8 @@ input[type="range"]:hover::-webkit-slider-thumb, input[type="range"]:active::-we
 .field { width: 190px; height: 34px; border-radius: 10px; border: 1px solid var(--hair-2); background: rgba(0, 0, 0, 0.25); padding: 0 12px; outline: 0; font-size: 13.5px; }
 .field:focus { border-color: rgba(255, 255, 255, 0.35); }
 #quality { white-space: nowrap; }
+.slsk-filters { margin: 0 0 10px; }
+.slsk-head .sortable { cursor: pointer; user-select: none; }
+.slsk-head .sortable:hover { color: var(--ink); }
+.slsk-head .sortable[data-dir]:not([data-dir=""])::after { content: ' ' attr(data-dir); color: var(--ink); }
+.chip.hidden { display: none; }

@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Check the UI scripts
+        run: for f in ui/*.js; do node --check "$f"; done
+
+      - name: Autoplay language test
+        run: node tests/autoplay_lang.mjs ui
+
+      - name: Build
+        run: cargo build --manifest-path src-tauri/Cargo.toml --locked
+
+      - name: Make a test FLAC
+        run: |
+          pip install numpy soundfile
+          python src-tauri/tests/make_tone.py "$RUNNER_TEMP/tone.flac"
+
+      - name: Soulseek test against the mock network (direct and firewalled)
+        run: |
+          for mode in direct relay; do
+            mkdir -p "$RUNNER_TEMP/$mode/appdata" "$RUNNER_TEMP/$mode/local"
+            python -I src-tauri/tests/mock_slsk.py "$RUNNER_TEMP/tone.flac" $mode > "$RUNNER_TEMP/mock-$mode.log" 2>&1 &
+            mock=$!
+            sleep 2
+            APPDATA="$RUNNER_TEMP/$mode/appdata" LOCALAPPDATA="$RUNNER_TEMP/$mode/local" \
+              MIEK_SLSK_SERVER=127.0.0.1:22420 MIEK_SLSK_BIND=127.0.0.1 MIEK_SLSK_TEST_FILE="$RUNNER_TEMP/tone.flac" \
+              cargo test --manifest-path src-tauri/Cargo.toml --locked -- --include-ignored || { cat "$RUNNER_TEMP/mock-$mode.log"; kill $mock; exit 1; }
+            kill $mock || true
+          done

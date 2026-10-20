@@ -189,8 +189,18 @@ fn config_path() -> PathBuf {
     let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
     base.join("Miek").join("soulseek.json")
 }
+/// The saved settings. On first run (no settings yet) Soulseek is on, with a generated name and
+/// password filled in (Soulseek registers a new name on its first login), so it works out of the box.
 fn load_config() -> Config {
-    std::fs::read(config_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    if let Some(c) = std::fs::read(config_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
+        return c;
+    }
+    if config_path().exists() {
+        return Config::default(); // unreadable: don't overwrite what's there
+    }
+    let c = Config { enabled: true, username: format!("miek-{}", rand_word(7)), password: rand_word(16) };
+    let _ = save_config(&c);
+    c
 }
 fn save_config(c: &Config) -> Result<(), String> {
     let p = config_path();
@@ -1032,11 +1042,20 @@ pub fn slsk_results(token: u32, from: usize) -> Result<Results, String> {
 }
 
 /// Start streaming a search result (or reuse a transfer of the same file). `keep` = a download the
-/// user asked to keep; plain streams are cancelled when another stream starts.
+/// user asked to keep; plain streams are cancelled when another stream starts. `prefetch` = the next
+/// song in the queue, fetched ahead: it leaves the playing stream alone.
 #[tauri::command]
-pub fn slsk_stream(user: String, file: String, latin1: bool, size: u64, keep: bool) -> Result<String, String> {
-    let existing = st().transfers.iter().find(|(_, t)| t.user == user && t.file == file && t.active() && !t.shared.cancel.load(Ordering::SeqCst)).map(|(id, t)| (*id, t.clone()));
-    if !keep {
+pub fn slsk_stream(user: String, file: String, latin1: bool, size: u64, keep: bool, prefetch: Option<bool>) -> Result<String, String> {
+    // a transfer of this file that is running or finished (asking again must not pile up entries)
+    let existing = st()
+        .transfers
+        .iter()
+        .find(|(_, t)| {
+            let done = t.state() == "done" && t.path.with_extension("done").exists(); // still in the cache
+            t.user == user && t.file == file && (t.active() || done) && !t.shared.cancel.load(Ordering::SeqCst)
+        })
+        .map(|(id, t)| (*id, t.clone()));
+    if !keep && !prefetch.unwrap_or(false) {
         stop_streams(existing.as_ref().map(|e| e.0));
     }
     if let Some((id, t)) = existing {
@@ -1197,7 +1216,7 @@ mod tests {
         assert!(latin.file.contains("Café"), "{}", latin.file);
 
         // stream: queued → transferring; playback starts long before the file is complete
-        let id = slsk_stream(hit.user.clone(), hit.file.clone(), hit.latin1, hit.size, false).unwrap();
+        let id = slsk_stream(hit.user.clone(), hit.file.clone(), hit.latin1, hit.size, false, None).unwrap();
         let mut states = vec![];
         wait("first bytes", 30, || {
             let i = slsk_transfer(id.clone()).unwrap();
@@ -1224,7 +1243,7 @@ mod tests {
         assert!((frames as i64 - 30 * 48000).abs() < 48000 / 10, "{frames}");
 
         // a Latin-1 named file is requested with its original bytes; cancelling stops it
-        let id2 = slsk_stream(latin.user.clone(), latin.file.clone(), true, latin.size, false).unwrap();
+        let id2 = slsk_stream(latin.user.clone(), latin.file.clone(), true, latin.size, false, None).unwrap();
         wait("latin-1 transfer", 30, || slsk_transfer(id2.clone()).unwrap().state == "transferring");
         slsk_cancel(id2.clone());
         let got = slsk_transfer(id2.clone()).unwrap().received;
@@ -1234,15 +1253,15 @@ mod tests {
         assert!(i.received <= got + 64 * 1024, "kept receiving after cancel");
 
         // refusals and offline peers are reported, not papered over
-        let id3 = slsk_stream("alice".into(), r"Music\Alice\denied.flac".into(), false, 1234567, false).unwrap();
+        let id3 = slsk_stream("alice".into(), r"Music\Alice\denied.flac".into(), false, 1234567, false, None).unwrap();
         wait("denial", 15, || slsk_transfer(id3.clone()).unwrap().state == "failed");
         assert!(slsk_transfer(id3).unwrap().error.unwrap().contains("Too many files"));
-        let id4 = slsk_stream("bob".into(), "x.flac".into(), false, 10, false).unwrap();
+        let id4 = slsk_stream("bob".into(), "x.flac".into(), false, 10, false, None).unwrap();
         wait("offline", 15, || slsk_transfer(id4.clone()).unwrap().state == "failed");
         assert_eq!(slsk_transfer(id4).unwrap().error.unwrap(), "bob is offline");
 
         // a finished transfer replays from the cache
-        let again = slsk_stream(hit.user.clone(), hit.file.clone(), false, hit.size, false).unwrap();
+        let again = slsk_stream(hit.user.clone(), hit.file.clone(), false, hit.size, false, None).unwrap();
         assert_eq!(slsk_transfer(again).unwrap().state, "done");
 
         slsk_config_set(false, "tester".into(), "secret".into()).unwrap();

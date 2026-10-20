@@ -37,7 +37,14 @@
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
+    "targets": ["nsis"],
+    "publisher": "Miek",
+    "shortDescription": "Lossless music player",
+    "windows": {
+      "nsis": { "installMode": "currentUser" },
+      "webviewInstallMode": { "type": "downloadBootstrapper" }
+    },
     "icon": [
       "icons/icon.ico",
       "icons/icon.png"

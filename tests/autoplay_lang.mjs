@@ -1,4 +1,4 @@
-// Autoplay language test: runs the real ui/app.js + ui/recommend.js in a VM with a stand-in DOM and
+// Autoplay language test: runs the real ui/app.js + ui/soulseek.js + ui/recommend.js in a VM with a stand-in DOM and
 // a fake backend, and checks that Autoplay keeps the language of what you are listening to.
 //   node tests/autoplay_lang.mjs ui
 import { readFileSync } from 'node:fs';
@@ -52,7 +52,7 @@ ctx.__TAURI__ = {
   window: { getCurrentWindow: () => any }, dialog: {},
 };
 vm.createContext(ctx);
-for (const f of ['app.js', 'recommend.js']) vm.runInContext(readFileSync(`${UI}/${f}`, 'utf8'), ctx, { filename: f });
+for (const f of ['app.js', 'soulseek.js', 'recommend.js']) vm.runInContext(readFileSync(`${UI}/${f}`, 'utf8'), ctx, { filename: f });
 await new Promise((r) => setTimeout(r, 50));
 
 const check = (ok, msg) => { console.log((ok ? 'PASS ' : 'FAIL ') + msg); if (!ok) process.exitCode = 1; };

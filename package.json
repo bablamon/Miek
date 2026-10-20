@@ -4,7 +4,8 @@
   "version": "0.3.0",
   "scripts": {
     "dev": "tauri dev",
-    "build": "tauri build --no-bundle",
+    "build": "tauri build",
+    "build:exe": "tauri build --no-bundle",
     "icon": "tauri icon icon.svg"
   },
   "devDependencies": {

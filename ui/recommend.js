@@ -20,6 +20,7 @@ function taste() {
   t.artists = t.artists || {};
   t.tags = t.tags || {};
   t.skips = t.skips || {};
+  t.langs = t.langs || {}; // artist → { language: songs seen in it }
   return t;
 }
 const artistKeys = (t) => (t.artists || []).map((a) => norm(a.name)).filter(Boolean);
@@ -40,6 +41,7 @@ function learn(track, weight) {
   decay(T.tags, 300);
   for (const a of artistKeys(track)) T.artists[a] = (T.artists[a] || 0) + weight;
   for (const g of track.tags || []) T.tags[g] = (T.tags[g] || 0) + weight * 0.5;
+  rememberLanguage(track);
   libSave();
 }
 
@@ -74,8 +76,15 @@ async function soulseekCandidates(artist, asArtist = true) {
   const cached = SLSK_CANDIDATES.get(key);
   if (cached && Date.now() - cached.at < 10 * 60e3) return cached.list;
   const token = await invoke('slsk_search', { query: artist });
-  await sleep(6000); // peers answer over a few seconds
-  const { hits } = await invoke('slsk_results', { token, from: 0 });
+  // peers answer over several seconds: stop early once there's plenty, wait longer when answers are few
+  const hits = [];
+  for (let waited = 0; ; ) {
+    await sleep(500);
+    waited += 500;
+    const r = await invoke('slsk_results', { token, from: hits.length });
+    hits.push(...r.hits);
+    if (r.done || waited >= 12000 || (waited >= 2000 && hits.length >= 60)) break;
+  }
   const want = words(artist);
   const rank = (x) => [FORMAT_ORDER(x.ext), x.slotFree ? 0 : 1, x.queue, -x.speed];
   const better = (a, b) => { const [p, q] = [rank(a), rank(b)]; for (let i = 0; i < p.length; i++) if (p[i] !== q[i]) return p[i] < q[i]; return false; };
@@ -131,9 +140,23 @@ function detectLanguage(t) {
   if (en >= 1 && en > hi) return 'en';
   return null;
 }
+// what language each artist sings in, kept with your taste: songs whose titles don't show it
+// (e.g. "Satranga") are recognised even when you haven't played that artist lately.
+// Only languages seen directly in a title are kept, so a guess never feeds itself.
+function rememberLanguage(track) {
+  const l = detectLanguage(track);
+  if (!l) return;
+  const L = taste().langs;
+  for (const a of artistKeys(track)) {
+    L[a] = L[a] || {};
+    L[a][l] = Math.min(20, (L[a][l] || 0) + 1);
+  }
+  const keys = Object.keys(L);
+  if (keys.length > 1000) keys.slice(0, keys.length - 1000).forEach((k) => delete L[k]);
+}
 // a song's language, falling back to the language most of its artist's known songs are in
 function languages(tracks) {
-  const byArtist = new Map();
+  const byArtist = new Map(Object.entries(taste().langs).map(([a, m]) => [a, new Map(Object.entries(m))]));
   for (const t of tracks) {
     const l = detectLanguage(t);
     if (!l) continue;
