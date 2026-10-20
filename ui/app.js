@@ -55,7 +55,10 @@ function mosaic(images, cls = 'thumb') {
   return h('div', { class: cls + ' mosaic' }, imgs.map((s) => img(s)));
 }
 function artistLinks(t) {
-  if (t.slsk) return h('span', { text: `${t.folder ? t.folder + ' · ' : ''}from ${t.slsk.user}` });
+  if (t.slsk) {
+    const by = names(t.artists) || t.folder;
+    return h('span', { text: `${by ? by + ' · ' : ''}from ${t.slsk.user}` });
+  }
   const span = h('span', {});
   (t.artists || []).forEach((a, i) => {
     if (i) span.append(', ');
@@ -212,17 +215,29 @@ function slskQuality(x) {
   if (x.bitrate) return `${x.bitrate} kbps${x.vbr ? ' VBR' : ''}${x.sampleRate ? ' · ' + fmtRate(x.sampleRate) : ''}`;
   return x.sampleRate ? fmtRate(x.sampleRate) : '';
 }
+const splitArtists = (s) => s.split(/\s*[;,]\s*|\s+\/\s+/).filter(Boolean).map((name) => ({ name }));
+// a first guess from the path: "Artist - Title" in the filename, else the artist of an "Artist - Album"
+// folder. The file's own tags replace it once it plays (adoptTags).
+function guessFromPath(parts, base) {
+  const stem = base.replace(/\.[^.]+$/, '').replace(/^\s*\d{1,3}[\s.\-_)]+(?=\D)/, '');
+  const m = stem.match(/^(.+?)\s+[-–]\s+(.+)$/);
+  if (m) return { artist: m[1], title: m[2] };
+  const f = (parts[parts.length - 1] || '').match(/^(.+?)\s+[-–]\s+.+$/);
+  return { artist: f ? f[1] : null, title: stem };
+}
 function slskTrack(x) {
   const parts = x.file.split(/[\\/]/).filter(Boolean);
   const base = parts.pop() || x.file;
+  const guess = guessFromPath(parts, base);
   return {
     uri: 'slsk:' + x.user + '\n' + x.file,
     source: 'slsk',
     src: { kind: 'slsk', value: x.user + '\n' + x.file }, // the real transfer id is made at play time
     slsk: { user: x.user, file: x.file, latin1: !!x.latin1, size: x.size },
-    name: base.replace(/\.[^.]+$/, ''),
+    fileName: base,
+    name: guess.title || base,
     folder: parts.slice(-2).join(' / '),
-    artists: [],
+    artists: guess.artist ? splitArtists(guess.artist) : [],
     album: null,
     image: null,
     duration: (x.duration || 0) * 1000,
@@ -310,7 +325,7 @@ function slskRow(t) {
   const play = () => playOne(t);
   const row = h('div', { class: 'trow slsk-row', 'data-uri': t.uri, ondblclick: play, oncontextmenu: (e) => { e.preventDefault(); trackMenu(e, t, 0, {}, row); } },
     h('div', { class: 't-idx', onclick: play, title: 'Play this file' }, icon('play', 14)),
-    h('div', { class: 't-text', title: x.file }, h('div', { class: 't-name', text: t.name + (x.ext ? '.' + x.ext : '') }), h('div', { class: 't-sub', text: t.folder || x.file })),
+    h('div', { class: 't-text', title: x.file }, h('div', { class: 't-name', text: t.fileName }), h('div', { class: 't-sub', text: t.folder || x.file })),
     h('div', { class: 't-text', title: `${x.slotFree ? 'Free upload slot' : 'No free upload slot'} · ${x.queue} queued · ${fmtSize(x.speed)}/s average` },
       h('div', { class: 't-sub', text: x.user }), h('div', { class: 'fine', text: x.slotFree ? 'slot free' : `${x.queue} in queue` })),
     h('div', { class: 't-text' }, h('div', { class: 't-sub', text: x.ext.toUpperCase() }), h('div', { class: 'fine', text: slskQuality(x) || '—' })),
@@ -330,11 +345,17 @@ async function slskPrepare(t) {
     const id = await invoke('slsk_stream', { user, file, latin1, size, keep: false });
     if (mine !== SL.wait) { invoke('slsk_cancel', { id }).catch(() => {}); return null; }
     SL.id = id;
+    const asked = Date.now();
     for (;;) {
       if (mine !== SL.wait || current() !== t) return null;
       const x = (SL.info = await invoke('slsk_transfer', { id }));
       if (x.state === 'failed') throw new Error(`Soulseek · ${x.error}`);
       if (x.state === 'cancelled') return null;
+      // an Autoplay pick you didn't choose doesn't get to keep you waiting in someone's queue
+      if (t.radio && x.state !== 'transferring' && x.state !== 'done' && Date.now() - asked > 20000) {
+        invoke('slsk_cancel', { id }).catch(() => {});
+        throw new Error(`Soulseek · ${x.user} didn’t start sending “${t.name}”; skipping it`);
+      }
       if (x.state === 'done' || x.received >= Math.min(x.size, 256 * 1024)) return id;
       await sleep(250);
     }
@@ -448,7 +469,11 @@ async function loadIndex(i, autoplay = true) {
       invoke('slsk_stop_streams').catch(() => {});
       Q.seq = await invoke('player_load', { src: t.src, autoplay });
     }
-  } catch (e) { fail(e); }
+  } catch (e) {
+    fail(e);
+    // a Soulseek file you picked stays put; an Autoplay pick that can't be had is skipped
+    if (t.slsk && t.radio) setTimeout(() => current() === t && next(true), 1500);
+  }
   prefetchNext();
   topUpAutoplay();
 }
@@ -1003,14 +1028,17 @@ async function pollState() {
     qb.title = `Source ${src} · output ${s.device || 'default device'} at ${(s.outRate / 1000).toFixed(1)} kHz${resampled ? ' (high-quality resampling)' : ' (no resampling)'}${arriving}`;
     qb.classList.remove('hidden');
   } else qb.classList.add('hidden');
-  if (s.cover && cur0 && !cur0.image && s.seq === Q.seq) adoptCover(cur0, convertFileSrc(s.cover));
+  // only this song's own file: never what the engine still reports about the previous one
+  const own = cur0 && s.seq === Q.seq && s.source === (cur0.slsk ? (SL.uri === cur0.uri ? SL.id : null) : cur0.src.value);
+  if (own && s.cover && !cur0.image) adoptCover(cur0, convertFileSrc(s.cover));
+  if (own && s.tags && cur0.slsk && !cur0.tagged) adoptTags(cur0, s.tags);
   if ((s.status === 'ended' || s.status === 'error') && s.seq === Q.seq && S.handledSeq !== s.seq) {
     S.handledSeq = s.seq;
     const cur = current();
     // never swap in another version: report it; a Soulseek file stays put so the user can pick another result
     if (s.status === 'error') {
       toast(`Couldn’t play “${cur ? cur.name : 'track'}”: ${s.error || 'unknown error'}`);
-      if (!(cur && cur.slsk)) setTimeout(() => next(true), 900);
+      if (!(cur && cur.slsk) || cur.radio) setTimeout(() => next(true), 900);
     } else next(true);
   }
 }
@@ -1022,6 +1050,26 @@ function adoptCover(t, src) {
   const lists = [LIB.data.recent, LIB.data.liked, ...LIB.data.playlists.map((p) => p.tracks)];
   for (const list of lists) for (const x of list) if (x.uri === t.uri && !x.image) x.image = src;
   libSave();
+  refreshQueue();
+}
+
+// a Soulseek file's own tags replace what was guessed from its path (title, artist, genre), so the
+// player shows the real names and Autoplay knows what you're listening to
+function adoptTags(t, tg) {
+  t.tagged = true;
+  const before = artistKeys(t).join('|');
+  if (tg.title) t.name = tg.title;
+  const who = tg.artist || tg.albumArtist;
+  if (who) t.artists = splitArtists(who);
+  if (tg.genre) t.tags = tg.genre.split(/\s*[;,/]\s*/).map(norm).filter(Boolean);
+  const lists = [LIB.data.recent, LIB.data.liked, ...LIB.data.playlists.map((p) => p.tracks)];
+  for (const list of lists) for (const x of list) if (x.uri === t.uri) Object.assign(x, { name: t.name, artists: t.artists, tags: t.tags });
+  $('np-title').textContent = t.name;
+  $('np-artist').replaceChildren(artistLinks(t));
+  document.title = `${t.name} · ${names(t.artists)}`;
+  libSave();
+  // Autoplay may have picked from the guessed artist; pick again from the real one
+  if (artistKeys(t).join('|') !== before && current() === t) repickAutoplay();
   refreshQueue();
 }
 

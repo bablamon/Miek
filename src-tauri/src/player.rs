@@ -20,13 +20,23 @@ use symphonia::core::errors::Error as SymError;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, TrackType};
 use symphonia::core::io::{MediaSource, MediaSourceStream};
-use symphonia::core::meta::MetadataOptions;
+use symphonia::core::meta::{MetadataContainer, MetadataOptions};
 use symphonia::core::units::{Time, TimeBase};
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct Src {
     kind: String, // "file" | "url"
     value: String,
+}
+
+#[derive(Serialize, Clone, Default, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Tags {
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    album_artist: Option<String>,
+    genre: Option<String>,
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -41,6 +51,10 @@ pub struct Info {
     codec: Option<String>,
     /// picture embedded in the file (saved under the covers folder), for sources without artwork
     cover: Option<String>,
+    /// the file's own tags (title, artist, …), for sources that only know a filename
+    tags: Option<Tags>,
+    /// what is loaded (the Src value), so the UI can tell this file's tags and cover from the last one's
+    source: Option<String>,
     sample_rate: u32,
     bit_depth: Option<u32>,
     channels: usize,
@@ -839,15 +853,42 @@ impl MediaSource for StreamSource {
     }
 }
 
-/// The file's own cover picture (front cover if marked), written to the covers folder once per image.
-fn embedded_cover(format: &mut dyn FormatReader) -> Option<String> {
-    use symphonia::core::meta::StandardVisualKey;
+/// Every metadata revision the reader found while opening (e.g. ID3 and the format's own tags).
+fn all_metadata(format: &mut dyn FormatReader) -> Vec<MetadataContainer> {
     let mut md = format.metadata();
-    let mut visuals = md.current().map(|r| r.media.visuals.clone()).unwrap_or_default();
-    if let Some(r) = md.skip_to_latest() {
-        visuals.extend(r.media.visuals.iter().cloned());
+    let mut out: Vec<_> = md.current().map(|r| r.media.clone()).into_iter().collect();
+    while md.pop().is_some() {
+        out.extend(md.current().map(|r| r.media.clone()));
     }
-    let v = visuals.iter().find(|v| v.usage == Some(StandardVisualKey::FrontCover)).or(visuals.first())?;
+    out
+}
+
+/// The file's own title / artist / album / genre tags, if it has any.
+fn embedded_tags(media: &[MetadataContainer]) -> Option<Tags> {
+    use symphonia::core::meta::StandardTag as S;
+    let mut out = Tags::default();
+    for t in media.iter().flat_map(|m| m.tags.iter().cloned()) {
+        let (slot, v) = match t.std {
+            Some(S::TrackTitle(v)) => (&mut out.title, v),
+            Some(S::Artist(v)) => (&mut out.artist, v),
+            Some(S::Album(v)) => (&mut out.album, v),
+            Some(S::AlbumArtist(v)) => (&mut out.album_artist, v),
+            Some(S::Genre(v)) => (&mut out.genre, v),
+            _ => continue,
+        };
+        let v = v.trim();
+        if slot.is_none() && !v.is_empty() {
+            *slot = Some(v.to_string());
+        }
+    }
+    (out.title.is_some() || out.artist.is_some()).then_some(out)
+}
+
+/// The file's own cover picture (front cover if marked), written to the covers folder once per image.
+fn embedded_cover(media: &[MetadataContainer]) -> Option<String> {
+    use symphonia::core::meta::StandardVisualKey;
+    let visuals: Vec<_> = media.iter().flat_map(|m| m.visuals.iter()).collect();
+    let v = *visuals.iter().find(|v| v.usage == Some(StandardVisualKey::FrontCover)).or(visuals.first())?;
     let ext = match v.media_type.as_deref().unwrap_or("") {
         "image/png" => "png",
         "image/jpeg" | "image/jpg" => "jpg",
@@ -1031,6 +1072,8 @@ impl Engine {
             i.duration = 0.0;
             i.codec = None;
             i.cover = None;
+            i.tags = None;
+            i.source = Some(src.value.clone());
         });
         if let Err(e) = self.ensure_output() {
             self.set(|i| {
@@ -1102,7 +1145,9 @@ impl Engine {
             sh.probing.store(false, Ordering::Relaxed);
         }
         let mut format = format.map_err(|e| format!("Unsupported audio: {e}"))?;
-        let cover = embedded_cover(&mut *format);
+        let media = all_metadata(&mut *format);
+        let tags = embedded_tags(&media);
+        let cover = embedded_cover(&media);
         let track = format.default_track(TrackType::Audio).ok_or("No audio track")?;
         let track_id = track.id;
         let time_base = track.time_base;
@@ -1134,6 +1179,7 @@ impl Engine {
             i.bit_depth = bits;
             i.channels = channels;
             i.cover = cover;
+            i.tags = tags;
         });
         Ok(Track { format, decoder, track_id, time_base, src_rate, resampler, pending: vec![], drop_frames: 0, eof: false, seq })
     }

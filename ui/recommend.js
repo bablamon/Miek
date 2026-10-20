@@ -4,8 +4,9 @@
 // - a taste profile learned from what you do: finishing a song counts for it, skipping it in the
 //   first 30 s counts against it, liking counts strongly; old signals fade so it follows your taste now;
 // - the session: the last few songs you played, not just the current one;
-// - candidates from your library, your liked songs, the same artists on the Internet Archive and
-//   Wikimedia Commons, and Archive recordings sharing genre/subject tags;
+// - candidates from your library, your liked songs, the same artists on Soulseek (when it's on), the
+//   Internet Archive and Wikimedia Commons, and Archive recordings sharing genre/subject tags;
+// - never a song you just heard again, even as another copy from another source or user;
 // - a score from artist + tag similarity and your taste, with a little randomness for discovery,
 //   then a diverse pick: at most 2 per artist or album, never the same artist twice in a row.
 // Loaded after app.js; uses its globals (invoke, LIB, LOCAL, Q, current, norm, …).
@@ -63,6 +64,40 @@ async function archiveTracks(items, n) {
   const lists = await Promise.all(shuffleArr(items).slice(0, n).map((it) => iaItem(it.id).then((d) => d.tracks.map((t) => iaTrack(d, t))).catch(() => [])));
   return lists.flat();
 }
+// Soulseek: search for the artist, keep files whose path names that artist and that look like a song,
+// one copy per song: FLAC over MP3 over the rest, then a free slot, a short queue, a fast peer
+const SLSK_CANDIDATES = new Map(); // artist → { at, list }; spares the network repeated searches
+async function soulseekCandidates(artist) {
+  const key = norm(artist);
+  const cached = SLSK_CANDIDATES.get(key);
+  if (cached && Date.now() - cached.at < 10 * 60e3) return cached.list;
+  const token = await invoke('slsk_search', { query: artist });
+  await sleep(6000); // peers answer over a few seconds
+  const { hits } = await invoke('slsk_results', { token, from: 0 });
+  const want = words(artist);
+  const rank = (x) => [FORMAT_ORDER(x.ext), x.slotFree ? 0 : 1, x.queue, -x.speed];
+  const better = (a, b) => { const [p, q] = [rank(a), rank(b)]; for (let i = 0; i < p.length; i++) if (p[i] !== q[i]) return p[i] < q[i]; return false; };
+  const best = new Map();
+  for (const x of hits) {
+    if (x.duration && (x.duration < 90 || x.duration > 720)) continue;
+    const path = new Set(words(x.file));
+    if (!want.every((w) => path.has(w))) continue;
+    const t = slskTrack(x);
+    if (!artistKeys(t).some((a) => a.includes(key) || key.includes(a))) t.artists = [{ name: artist }];
+    const song = songWords(t).join(' ');
+    const have = best.get(song);
+    if (!have || better(x, have.x)) best.set(song, { x, t });
+  }
+  const list = [...best.values()].slice(0, 30).map((b) => b.t);
+  SLSK_CANDIDATES.set(key, { at: Date.now(), list });
+  return list;
+}
+async function slskOnline() {
+  try { return (await invoke('slsk_status')).state === 'online'; } catch { return false; }
+}
+// same song, whichever copy: first artist + the title's identifying words
+const songKey = (t) => (artistKeys(t)[0] || '') + '|' + songWords(t).join(' ');
+
 async function gather(session) {
   const T = taste();
   const counts = (keysOf) => {
@@ -75,9 +110,11 @@ async function gather(session) {
   const artists = [...new Set([...counts(artistKeys), ...topKeys(T.artists, 2)])].slice(0, 3).map((k) => names.get(k) || k);
   const tags = [...new Set([...counts((t) => t.tags || []), ...topKeys(T.tags, 2)])].slice(0, 3);
 
+  const slsk = artists.length && (await slskOnline());
   const jobs = [
     Promise.resolve(LOCAL.tracks),
     Promise.resolve(LIB.data.liked),
+    ...(slsk ? artists.slice(0, 2).map((a) => soulseekCandidates(a).catch(() => [])) : []),
     ...artists.map((a) => invoke('ia_search', { term: a }).then((items) => archiveTracks(items.slice(0, 4), 2)).catch(() => [])),
     ...artists.slice(0, 2).map((a) => invoke('commons_search', { term: a }).then((r) => r.map(wcTrack)).catch(() => [])),
     ...tags.slice(0, 2).map((g) => invoke('ia_subject', { subject: g }).then((items) => archiveTracks(items, 2)).catch(() => [])),
@@ -113,7 +150,7 @@ function pickDiverse(scored, n, lastArtist) {
   for (const c of scored) {
     const a = artistKeys(c)[0] || '';
     const al = (c.album && c.album.key) || c.uri;
-    const song = a + '|' + songWords(c).join(' ');
+    const song = songKey(c);
     if ((perArtist.get(a) || 0) >= 2 || (perAlbum.get(al) || 0) >= 2 || songs.has(song)) continue;
     perArtist.set(a, (perArtist.get(a) || 0) + 1);
     perAlbum.set(al, (perAlbum.get(al) || 0) + 1);
@@ -139,17 +176,25 @@ async function recommend(n = 8) {
   const { candidates } = await gather(session);
   const T = taste();
   const recent = new Set(LIB.data.recent.slice(0, 25).map((t) => t.uri));
+  // songs just heard or already queued, as songs: another user's copy of the same song is no new song
+  const heard = new Set([...session, ...LIB.data.recent.slice(0, 25), ...Q.list.slice(Q.i + 1)].map(songKey));
   const seen = new Set();
   const fresh = candidates.filter((c) => {
     if (!c || !c.uri || seen.has(c.uri)) return false;
     seen.add(c.uri);
-    return !Q.radioSeen.has(c.uri) && !recent.has(c.uri) && (T.skips[c.uri] || 0) < 2;
+    return !Q.radioSeen.has(c.uri) && !recent.has(c.uri) && !heard.has(songKey(c)) && (T.skips[c.uri] || 0) < 2;
   });
   const ctx = {
     sessionArtists: new Set(session.flatMap(artistKeys)),
     sessionTags: new Set(session.flatMap((t) => t.tags || [])),
   };
-  const scored = fresh.map((c) => ({ c, s: score(c, ctx) })).sort((a, b) => b.s - a.s).map((x) => x.c);
+  // related = same artist or genre as the session, or something your taste or likes lean towards.
+  // With enough of those, unrelated picks don't pad the queue (it tops up again as it runs low).
+  const related = (c) => artistKeys(c).some((a) => ctx.sessionArtists.has(a) || (T.artists[a] || 0) > 0)
+    || (c.tags || []).some((g) => ctx.sessionTags.has(g) || (T.tags[g] || 0) > 0) || isLiked(c.uri);
+  const close = fresh.filter(related);
+  const pool = close.length >= 2 ? close : fresh;
+  const scored = pool.map((c) => ({ c, s: score(c, ctx) })).sort((a, b) => b.s - a.s).map((x) => x.c);
   const last = session[session.length - 1];
   return pickDiverse(scored, n, artistKeys(last)[0] || '');
 }
@@ -180,6 +225,18 @@ function topUpAutoplay() {
   return REC.busy;
 }
 
+// the song's real artist turned out different from the guess: replace the picks that haven't played yet
+async function repickAutoplay() {
+  await REC.busy;
+  for (let k = Q.list.length - 1; k > Q.i; k--) {
+    if (Q.list[k].radio) {
+      Q.radioSeen.delete(Q.list[k].uri);
+      Q.list.splice(k, 1);
+    }
+  }
+  topUpAutoplay();
+}
+
 // ----------------------------------------------------------------- settings
 function autoplaySettings() {
   const T = taste();
@@ -192,7 +249,7 @@ function autoplaySettings() {
   const favs = [...topKeys(T.artists, 3), ...topKeys(T.tags, 3)];
   return h('div', { class: 'panel' },
     h('div', { class: 'setting' },
-      h('div', {}, h('div', { class: 'label', text: 'Autoplay' }), h('div', { class: 'fine', text: 'When your queue ends, keep playing songs picked for you from your music, the Internet Archive and Wikimedia Commons.' })),
+      h('div', {}, h('div', { class: 'label', text: 'Autoplay' }), h('div', { class: 'fine', text: 'When your queue ends, keep playing songs picked for you from your music, Soulseek (when it’s on), the Internet Archive and Wikimedia Commons.' })),
       btn),
     h('div', { class: 'setting' },
       h('div', {}, h('div', { class: 'label', text: 'Your taste' }),

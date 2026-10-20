@@ -17,6 +17,10 @@ DATA = open(AUDIO, "rb").read()
 FILES = {
     b"Music\\Alice\\Tones\\01 - Test Tone.flac": DATA,
     "Música\\Tones\\Café tone.flac".encode("latin-1"): DATA,
+    # what Autoplay finds when it searches for the artist ("Test Artist")
+    b"Music\\Test Artist\\Songs\\02 - Song Two.flac": DATA,
+    b"Music\\Test Artist\\Songs\\03 - Song Three.flac": DATA,
+    b"Music\\Test Artist\\Songs\\01 - Test Tone.flac": DATA,
 }
 DENIED = b"Music\\Alice\\denied.flac"
 RATE = 600 * 1024
@@ -57,7 +61,7 @@ def connect_client():
     return socket.create_connection(("127.0.0.1", client["port"]), timeout=10)
 
 # ------------------------------------------------------------------ alice
-ALICE_ITEMS = [(f, len(d), [(1, 30), (4, 48000), (5, 24)]) for f, d in FILES.items()]
+ALICE_ITEMS = [(f, len(d), [(1, 30), (4, 48000), (5, 24)]) for f, d in FILES.items() if b"Test Artist" not in f]
 ALICE_ITEMS += [(DENIED, 1234567, [(1, 30), (4, 44100), (5, 16)]), (b"Music\\Alice\\Tones\\cover.jpg", 2048, [])]
 # carol answers first, with lossy files only (FLAC results must still be listed ahead of them)
 CAROL_ITEMS = [(b"Share\\Tones\\Test Tone.m4a", 3000000, [(0, 256), (1, 30)]), (b"Share\\Tones\\Test Tone.mp3", 1200000, [(0, 320), (1, 30), (2, 0)])]
@@ -168,14 +172,21 @@ def alice_pierce_p(ctoken):
     log("alice pierced client for P")
     threading.Thread(target=lambda: [handle_peer(c, f, [700]) for f in frames(c)], daemon=True).start()
 
-def alice_search(token):
+SONG = [(1, 200), (4, 48000), (5, 24)]
+ARTIST_ALICE = [(f, len(FILES[f]), SONG) for f in FILES if b"Test Artist" in f]
+ARTIST_ALICE.append((b"Music\\Test Artist\\Songs\\Intro.flac", 900000, [(1, 20), (4, 48000), (5, 24)]))  # too short for a song
+# carol (unreachable): an MP3 copy of a song alice has in FLAC, and a song only she has
+ARTIST_CAROL = [(b"Share\\Test Artist - Song Two.mp3", 8000000, [(0, 320), (1, 200)]), (b"Share\\Test Artist - Song Four.mp3", 8000000, [(0, 320), (1, 200)])]
+
+def alice_search(token, query=b""):
+    artist = b"test artist" in query.lower()
     early = connect_client()
     early.sendall(init(1, s("carol") + s("P") + struct.pack("<I", 0)))
-    early.sendall(search_response(token, "carol", CAROL_ITEMS))
+    early.sendall(search_response(token, "carol", ARTIST_CAROL if artist else CAROL_ITEMS))
     time.sleep(1.0)
     c = connect_client()
     c.sendall(init(1, s("alice") + s("P") + struct.pack("<I", 0)))
-    c.sendall(search_response(token))
+    c.sendall(search_response(token, "alice", ARTIST_ALICE) if artist else search_response(token))
     log(f"alice answered search {token}")
     if MODE == "relay":
         time.sleep(0.3)
@@ -207,7 +218,7 @@ def server():
                 to_client(msg(3, s(user) + struct.pack("<III", ip, port, 0) + struct.pack("<H", 0)))
             elif code == 26:
                 token = r.u32(); q = r.raw(); log(f"search {token} {q!r}")
-                threading.Thread(target=alice_search, args=(token,), daemon=True).start()
+                threading.Thread(target=alice_search, args=(token, q), daemon=True).start()
             elif code == 18:
                 token = r.u32(); user = r.raw(); kind = r.raw()
                 log(f"client ConnectToPeer {user!r} {kind!r} token {token}")
