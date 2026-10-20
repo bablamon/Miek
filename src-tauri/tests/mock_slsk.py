@@ -58,7 +58,9 @@ def to_client(b):
     with client["lock"]: client["conn"].sendall(b)
 
 def connect_client():
-    return socket.create_connection(("127.0.0.1", client["port"]), timeout=10)
+    c = socket.create_connection(("127.0.0.1", client["port"]), timeout=10)
+    c.settimeout(None)  # the 10 s is for connecting; an idle peer connection must stay open
+    return c
 
 # ------------------------------------------------------------------ alice
 ALICE_ITEMS = [(f, len(d), [(1, 30), (4, 48000), (5, 24)]) for f, d in FILES.items() if b"Test Artist" not in f]

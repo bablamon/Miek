@@ -11,7 +11,7 @@ use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Async, FixedAsync, Indexing, Resampler, SincInterpolationParameters, SincInterpolationType, WindowFunction};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Seek, SeekFrom};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -60,6 +60,8 @@ pub struct Info {
     channels: usize,
     out_rate: u32,
     device: Option<String>,
+    /// a seek is waiting for that part of a stream to arrive (the position already shows where it goes)
+    buffering: bool,
 }
 
 enum Cmd {
@@ -106,6 +108,12 @@ impl Player {
     }
 
     fn send(&self, c: Cmd) {
+        // a read waiting for stream data gives way to a new track or seek (see INTERRUPT)
+        match c {
+            Cmd::Load { .. } => INTERRUPT.fetch_max(BY_LOAD, Ordering::SeqCst),
+            Cmd::Seek(_) => INTERRUPT.fetch_max(BY_SEEK, Ordering::SeqCst),
+            Cmd::Toggle => 0,
+        };
         let _ = self.tx.lock().unwrap().send(c);
     }
 
@@ -763,6 +771,18 @@ fn sequential_download(
     }
 }
 
+/// Set when a new track or seek is sent: a read still waiting for stream data then gives up, so the
+/// engine isn't stuck (e.g. in a seek far ahead of a slow download) and handles the new command.
+/// A seek doesn't interrupt opening a track (it waits its turn); a new track interrupts anything.
+static INTERRUPT: AtomicU8 = AtomicU8::new(0);
+const BY_SEEK: u8 = 1;
+const BY_LOAD: u8 = 2;
+static OPENING: AtomicBool = AtomicBool::new(false);
+const INTERRUPTED: &str = "interrupted by a newer command";
+fn interrupted(e: &SymError) -> bool {
+    matches!(e, SymError::IoError(io) if io.to_string() == INTERRUPTED)
+}
+
 impl Drop for StreamSource {
     fn drop(&mut self) {
         if self.owns {
@@ -820,6 +840,10 @@ impl Read for StreamSource {
             if waited.elapsed() > Duration::from_secs(if self.ranged { 30 } else { 90 }) {
                 return Err(std::io::Error::other("Stream stalled"));
             }
+            let by = INTERRUPT.load(Ordering::SeqCst);
+            if by == BY_LOAD || (by == BY_SEEK && !OPENING.load(Ordering::SeqCst)) {
+                return Err(std::io::Error::other(INTERRUPTED));
+            }
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -830,6 +854,10 @@ impl Seek for StreamSource {
         let p = match to {
             SeekFrom::Start(p) => p as i64,
             SeekFrom::Current(d) => self.pos as i64 + d,
+            // a stream that arrives front to back ends, for now, where the data does: the FLAC/Ogg
+            // readers bound their seek search by it, so a seek into what has arrived doesn't wait
+            // on the middle of the file (and one further ahead scans forward as data comes in)
+            SeekFrom::End(d) if !self.ranged && !self.shared.done.load(Ordering::SeqCst) => self.shared.downloaded.load(Ordering::SeqCst) as i64 + d,
             SeekFrom::End(d) => self.len() as i64 + d,
         };
         if p < 0 {
@@ -1020,6 +1048,7 @@ impl Engine {
     fn handle(&mut self, c: Cmd) {
         match c {
             Cmd::Load { src, autoplay, seq } => {
+                INTERRUPT.store(0, Ordering::SeqCst);
                 // newest load wins: skip stale loads still queued behind it
                 let mut latest = (src, autoplay, seq);
                 while let Ok(next) = self.rx.try_recv() {
@@ -1055,7 +1084,10 @@ impl Engine {
                     _ => {}
                 }
             }
-            Cmd::Seek(secs) => self.seek(secs),
+            Cmd::Seek(secs) => {
+                INTERRUPT.store(0, Ordering::SeqCst);
+                self.seek(secs)
+            }
         }
     }
 
@@ -1083,7 +1115,10 @@ impl Engine {
             return;
         }
         self.flush(0.0);
-        match self.open(&src, seq) {
+        OPENING.store(true, Ordering::SeqCst);
+        let opened = self.open(&src, seq);
+        OPENING.store(false, Ordering::SeqCst);
+        match opened {
             Ok(t) => {
                 self.cur = Some(t);
                 if at > 0.0 {
@@ -1185,16 +1220,25 @@ impl Engine {
     }
 
     fn seek(&mut self, secs: f64) {
-        let Some(t) = self.cur.as_mut() else {
+        if self.cur.is_none() {
             // seeking after the track ended: reopen it there
             if let Some(src) = self.last_src.clone() {
                 let seq = self.info.lock().unwrap().seq;
                 self.start(src, self.want_play, seq, secs);
             }
             return;
-        };
+        }
         let Some(time) = Time::try_from_secs_f64(secs) else { return };
-        match t.format.seek(SeekMode::Accurate, SeekTo::Time { time, track_id: Some(t.track_id) }) {
+        // a stream may not have that part yet and the seek then waits for it: drop the old audio now
+        // and show the new position while it buffers, instead of the old one
+        let before = self.info_position();
+        self.flush(secs);
+        self.set(|i| i.buffering = true);
+        let t = self.cur.as_mut().unwrap();
+        let res = t.format.seek(SeekMode::Accurate, SeekTo::Time { time, track_id: Some(t.track_id) });
+        self.set(|i| i.buffering = false);
+        let t = self.cur.as_mut().unwrap();
+        match res {
             Ok(seeked) => {
                 t.decoder.reset();
                 if let Some(r) = t.resampler.as_mut() {
@@ -1211,7 +1255,11 @@ impl Engine {
                 }
                 self.flush(secs);
             }
-            Err(e) => self.set(|i| i.error = Some(format!("Seek failed: {e}"))),
+            Err(e) if interrupted(&e) => {} // a newer seek or track is waiting
+            Err(e) => {
+                self.flush(before);
+                self.set(|i| i.error = Some(format!("Seek failed: {e}")));
+            }
         }
     }
 
@@ -1257,6 +1305,7 @@ impl Engine {
             Ok(Some(p)) => Some(p),
             Ok(None) => None,
             Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => None,
+            Err(e) if interrupted(&e) => return Ok(()), // waiting for data; a newer command is queued
             Err(SymError::ResetRequired) => None,
             Err(e) => return Err(format!("{e}")),
         };

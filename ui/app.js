@@ -784,7 +784,7 @@ async function pollState() {
   const busy = s.status === 'playing' || s.status === 'loading';
   $('play').replaceChildren(icon(busy ? 'pause' : 'play', 20));
   $('play').title = busy ? 'Pause' : 'Play';
-  $('play').classList.toggle('loading', s.status === 'loading' || SL.waiting);
+  $('play').classList.toggle('loading', s.status === 'loading' || SL.waiting || (s.buffering && s.seq === Q.seq));
   if (SL.waiting) $('play').title = 'Stop waiting';
   const cur0 = current();
   if (cur0 && cur0.slsk && SL.uri === cur0.uri && SL.id && !SL.waiting && (!SL.info || SL.info.state !== 'done')) {
@@ -823,7 +823,9 @@ async function pollState() {
   } else if (s.codec && current() && s.seq === Q.seq) {
     const src = s.codec.toUpperCase() + (s.bitDepth ? ` ${s.bitDepth}/${+(s.sampleRate / 1000).toFixed(1)}` : ` ${+(s.sampleRate / 1000).toFixed(1)}k`);
     const resampled = s.outRate && s.outRate !== s.sampleRate;
-    qb.textContent = (resampled ? `${src} → ${+(s.outRate / 1000).toFixed(1)}` : src) + (slskNow && slskNow.state !== 'done' ? ` · ${slskStateText(slskNow)}` : '');
+    // after a seek past what has arrived: the time shows where it's going while that part comes in
+    const buffering = s.buffering ? ' · buffering' : '';
+    qb.textContent = (resampled ? `${src} → ${+(s.outRate / 1000).toFixed(1)}` : src) + buffering + (slskNow && slskNow.state !== 'done' ? ` · ${slskStateText(slskNow)}` : '');
     const arriving = slskNow && slskNow.state !== 'done' ? `\nSoulseek · ${slskNow.user}${slskNow.speed ? ' · ' + fmtSize(slskNow.speed) + '/s' : ''} · ${fmtSize(slskNow.received)} of ${fmtSize(slskNow.size)}` : '';
     qb.title = `Source ${src} · output ${s.device || 'default device'} at ${(s.outRate / 1000).toFixed(1)} kHz${resampled ? ' (high-quality resampling)' : ' (no resampling)'}${arriving}`;
     qb.classList.remove('hidden');
