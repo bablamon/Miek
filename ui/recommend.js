@@ -7,6 +7,7 @@
 // - candidates from your library, your liked songs, the same artists on Soulseek (when it's on), the
 //   Internet Archive and Wikimedia Commons, and Archive recordings sharing genre/subject tags;
 // - never a song you just heard again, even as another copy from another source or user;
+// - in the language you're listening in (see "language" below);
 // - a score from artist + tag similarity and your taste, with a little randomness for discovery,
 //   then a diverse pick: at most 2 per artist or album, never the same artist twice in a row.
 // Loaded after app.js; uses its globals (invoke, LIB, LOCAL, Q, current, norm, …).
@@ -67,7 +68,8 @@ async function archiveTracks(items, n) {
 // Soulseek: search for the artist, keep files whose path names that artist and that look like a song,
 // one copy per song: FLAC over MP3 over the rest, then a free slot, a short queue, a fast peer
 const SLSK_CANDIDATES = new Map(); // artist → { at, list }; spares the network repeated searches
-async function soulseekCandidates(artist) {
+// (`artist` false: a plain keyword search, e.g. "bollywood"; artists then come from each file's path)
+async function soulseekCandidates(artist, asArtist = true) {
   const key = norm(artist);
   const cached = SLSK_CANDIDATES.get(key);
   if (cached && Date.now() - cached.at < 10 * 60e3) return cached.list;
@@ -83,7 +85,7 @@ async function soulseekCandidates(artist) {
     const path = new Set(words(x.file));
     if (!want.every((w) => path.has(w))) continue;
     const t = slskTrack(x);
-    if (!artistKeys(t).some((a) => a.includes(key) || key.includes(a))) t.artists = [{ name: artist }];
+    if (asArtist && !artistKeys(t).some((a) => a.includes(key) || key.includes(a))) t.artists = [{ name: artist }];
     const song = songWords(t).join(' ');
     const have = best.get(song);
     if (!have || better(x, have.x)) best.set(song, { x, t });
@@ -98,7 +100,64 @@ async function slskOnline() {
 // same song, whichever copy: first artist + the title's identifying words
 const songKey = (t) => (artistKeys(t)[0] || '') + '|' + songWords(t).join(' ');
 
-async function gather(session) {
+// ----------------------------------------------------------------- language
+// Autoplay keeps to the language you're listening in. A song's language comes from its script, from
+// marker words ("Bollywood", "Punjabi"…), from common words (romanized Hindi is written in Latin
+// letters, so "Tum Hi Ho" is told apart from English by its words), or else from its artist's
+// other songs. Unknown stays unknown.
+const SCRIPTS = [
+  [/[ऀ-ॿ]/, 'hi'], [/[਀-੿]/, 'pa'], [/[઀-૿]/, 'gu'], [/[ঀ-৿]/, 'bn'],
+  [/[஀-௿]/, 'ta'], [/[ఀ-౿]/, 'te'], [/[ಀ-೿]/, 'kn'], [/[ഀ-ൿ]/, 'ml'],
+  [/[؀-ۿ]/, 'ar'], [/[֐-׿]/, 'he'], [/[Ѐ-ӿ]/, 'ru'], [/[Ͱ-Ͽ]/, 'el'],
+  [/[฀-๿]/, 'th'], [/[぀-ヿ]/, 'ja'], [/[가-힯]/, 'ko'], [/[一-鿿]/, 'zh'],
+];
+const MARKERS = [
+  [/\b(bollywood|hindi|filmi|ghazal|qawwali|desi)\b/, 'hi'], [/\bpunjabi\b/, 'pa'], [/\b(tamil|kollywood)\b/, 'ta'],
+  [/\b(telugu|tollywood)\b/, 'te'], [/\bmalayalam\b/, 'ml'], [/\bkannada\b/, 'kn'], [/\bbengali\b/, 'bn'], [/\bgujarati\b/, 'gu'],
+];
+const HI_WORDS = new Set('tum hi ho hai hain hoon mera meri mere tera teri tere dil pyaar pyar ishq mohabbat jaan ke ki ka ko se mein na nahi nahin kya kyun yeh woh aur bhi sajna sanam yaar zindagi tujhe mujhe tujhse mujhse tu hum jo kabhi raat baarish aankhen khuda saath abhi baaki kuch aaj kal dard chal rang sapna mann mahi dilbar humko tumko kaise kaun koi ek dono duniya jahan pal lamhe dhadkan aashiqui deewana deewani junoon tanha judaa barse badal'.split(' '));
+const EN_WORDS = new Set('the of and you your my me i im it its in on is be love all dont cant aint baby night girl boy heart with for this that we she he they what when where time way day life go come never little man woman blues sunshine away down up out like just know want need feel'.split(' '));
+
+function detectLanguage(t) {
+  const full = [t.name, t.album && t.album.name, t.folder, t.slsk && t.slsk.file, ...(t.tags || [])].filter(Boolean).join(' ');
+  for (const [re, l] of SCRIPTS) if (re.test(full)) return l;
+  const low = norm(full);
+  for (const [re, l] of MARKERS) if (re.test(low)) return l;
+  // the title's own words; "(From "Animal")" and "(Live at …)" notes say nothing about the song's language
+  const ws = norm(t.name || '').replace(/[([{].*?[)\]}]/g, ' ').replace(/[^\p{L}\p{N}' ]+/gu, ' ').replace(/'/g, '').split(/\s+/).filter(Boolean);
+  const hi = ws.filter((w) => HI_WORDS.has(w)).length;
+  const en = ws.filter((w) => EN_WORDS.has(w)).length;
+  if (hi >= 2 || (hi >= 1 && hi > en)) return 'hi';
+  if (en >= 1 && en > hi) return 'en';
+  return null;
+}
+// a song's language, falling back to the language most of its artist's known songs are in
+function languages(tracks) {
+  const byArtist = new Map();
+  for (const t of tracks) {
+    const l = detectLanguage(t);
+    if (!l) continue;
+    for (const a of artistKeys(t)) {
+      const m = byArtist.get(a) || new Map();
+      m.set(l, (m.get(l) || 0) + 1);
+      byArtist.set(a, m);
+    }
+  }
+  const artistLang = (a) => { const m = byArtist.get(a); return m ? [...m.entries()].sort((x, y) => y[1] - x[1])[0][0] : null; };
+  return (t) => detectLanguage(t) || artistKeys(t).map(artistLang).find(Boolean) || null;
+}
+// the language you're listening in now: the current song's, else the session's most common
+function sessionLanguage(session, langOf) {
+  const cur = langOf(session[session.length - 1]);
+  if (cur) return cur;
+  const c = new Map();
+  for (const t of session) { const l = langOf(t); if (l) c.set(l, (c.get(l) || 0) + 1); }
+  return [...c.entries()].sort((x, y) => y[1] - x[1])[0]?.[0] || null;
+}
+// Soulseek searches that find more songs in a language than one artist has
+const LANG_SEARCH = { hi: 'bollywood', pa: 'punjabi', ta: 'tamil', te: 'telugu', ml: 'malayalam', kn: 'kannada', bn: 'bengali', gu: 'gujarati' };
+
+async function gather(session, lang) {
   const T = taste();
   const counts = (keysOf) => {
     const c = new Map();
@@ -115,9 +174,11 @@ async function gather(session) {
     Promise.resolve(LOCAL.tracks),
     Promise.resolve(LIB.data.liked),
     ...(slsk ? artists.slice(0, 2).map((a) => soulseekCandidates(a).catch(() => [])) : []),
+    ...(slsk && LANG_SEARCH[lang] ? [soulseekCandidates(LANG_SEARCH[lang], false).catch(() => [])] : []),
     ...artists.map((a) => invoke('ia_search', { term: a }).then((items) => archiveTracks(items.slice(0, 4), 2)).catch(() => [])),
     ...artists.slice(0, 2).map((a) => invoke('commons_search', { term: a }).then((r) => r.map(wcTrack)).catch(() => [])),
-    ...tags.slice(0, 2).map((g) => invoke('ia_subject', { subject: g }).then((items) => archiveTracks(items, 2)).catch(() => [])),
+    // genre tags on the Archive are about Western recordings; they'd only bring the wrong language
+    ...(lang && lang !== 'en' ? [] : tags.slice(0, 2).map((g) => invoke('ia_subject', { subject: g }).then((items) => archiveTracks(items, 2)).catch(() => []))),
   ];
   // nothing to go on yet (new listener, untagged music): something lossless and live
   if (!artists.length && !tags.length) jobs.push(invoke('ia_shelf', { kind: 'live' }).then((items) => archiveTracks(items, 2)).catch(() => []));
@@ -173,16 +234,26 @@ function pickDiverse(scored, n, lastArtist) {
 async function recommend(n = 8) {
   const session = Q.list.slice(Math.max(0, Q.i - 4), Q.i + 1).filter(Boolean);
   if (!session.length) return [];
-  const { candidates } = await gather(session);
+  const known = [...session, ...LIB.data.recent.slice(0, 50), ...LIB.data.liked];
+  const lang = sessionLanguage(session, languages(known));
+  const { candidates } = await gather(session, lang);
+  const langOf = languages([...known, ...candidates]);
   const T = taste();
   const recent = new Set(LIB.data.recent.slice(0, 25).map((t) => t.uri));
   // songs just heard or already queued, as songs: another user's copy of the same song is no new song
   const heard = new Set([...session, ...LIB.data.recent.slice(0, 25), ...Q.list.slice(Q.i + 1)].map(songKey));
+  // in the session's language: for English, anything not known to be another language; for any
+  // other language, only songs known to be in it (better a shorter queue than the wrong language)
+  const sameLanguage = (c) => {
+    if (!lang) return true;
+    const l = langOf(c);
+    return lang === 'en' ? !l || l === 'en' : l === lang;
+  };
   const seen = new Set();
   const fresh = candidates.filter((c) => {
     if (!c || !c.uri || seen.has(c.uri)) return false;
     seen.add(c.uri);
-    return !Q.radioSeen.has(c.uri) && !recent.has(c.uri) && !heard.has(songKey(c)) && (T.skips[c.uri] || 0) < 2;
+    return !Q.radioSeen.has(c.uri) && !recent.has(c.uri) && !heard.has(songKey(c)) && (T.skips[c.uri] || 0) < 2 && sameLanguage(c);
   });
   const ctx = {
     sessionArtists: new Set(session.flatMap(artistKeys)),
@@ -191,7 +262,8 @@ async function recommend(n = 8) {
   // related = same artist or genre as the session, or something your taste or likes lean towards.
   // With enough of those, unrelated picks don't pad the queue (it tops up again as it runs low).
   const related = (c) => artistKeys(c).some((a) => ctx.sessionArtists.has(a) || (T.artists[a] || 0) > 0)
-    || (c.tags || []).some((g) => ctx.sessionTags.has(g) || (T.tags[g] || 0) > 0) || isLiked(c.uri);
+    || (c.tags || []).some((g) => ctx.sessionTags.has(g) || (T.tags[g] || 0) > 0) || isLiked(c.uri)
+    || (lang && lang !== 'en' && langOf(c) === lang); // e.g. other Bollywood artists after Arijit Singh
   const close = fresh.filter(related);
   const pool = close.length >= 2 ? close : fresh;
   const scored = pool.map((c) => ({ c, s: score(c, ctx) })).sort((a, b) => b.s - a.s).map((x) => x.c);
