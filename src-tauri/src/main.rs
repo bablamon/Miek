@@ -22,6 +22,7 @@ fn main() {
             archive::ia_search,
             archive::ia_shelf,
             archive::ia_item,
+            archive::ia_subject,
             commons::commons_search,
             library::library_load,
             library::library_save

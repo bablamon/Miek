@@ -14,7 +14,7 @@ Miek plays **your own music files**, **lossless recordings from the Internet Arc
 - **Explore** — search and stream nearly a million lossless items from the [Internet Archive](https://archive.org): live concerts (Live Music Archive), netlabels, jazz, classical, 78 rpm transfers. Streamed as FLAC, often 24-bit. No key, no login.
 - **Wikimedia Commons** — public-domain and Creative Commons recordings (much of it classical, e.g. Musopen), as FLAC with real bit depth and sample rate (often 24/48). Shown with each recording's licence.
 - **Best versions** — a search groups the same song across your files, the Archive and Commons, and plays the best lossless copy: lossless first, then higher bit depth, then higher sample rate, with your own file winning a tie. If that source fails to stream, Miek falls back to the next-best copy.
-- **Keeps playing** — when the queue runs out, Miek continues with similar music: same artist, then same genre from your library; for Archive recordings, more from the same artist or the live collection.
+- **Autoplay** — when the queue runs out, Miek keeps playing songs picked for you, back to back. It learns your taste on your computer (finishing a song counts for it, skipping it in the first 30 s counts against it, likes count strongly, and old signals fade). It looks at your last few songs, gathers candidates from your library, your likes, the same artists on the Archive and Commons, and recordings sharing genre tags, then scores them with a little randomness for discovery and keeps the mix varied (at most 2 per artist or album, never the same artist twice in a row). It tops up the queue before it runs out, so there's no wait between songs. Can be turned off or reset in Settings.
 - **Library** — liked songs, playlists, play history; stored locally in `%APPDATA%\Miek`.
 - **Quality you can see** — the player shows the real source format and what the device gets, e.g. `FLAC 24/96 → 48`.
 
@@ -52,6 +52,7 @@ npm run build        # → src-tauri/target/release/miek.exe
 | `src-tauri/src/commons.rs` | Wikimedia Commons FLAC music search (with format + licence) |
 | `src-tauri/src/library.rs` | likes / playlists / history storage |
 | `ui/` | interface (plain HTML/CSS/JS, no framework) |
+| `ui/recommend.js` | Autoplay: taste profile, candidates, scoring, queue top-up |
 | `ui/intro.js` | opening animation: the logo sketch draws itself, then beats to a synthesized drum groove |
 
 ## Not yet

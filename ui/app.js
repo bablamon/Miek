@@ -89,6 +89,7 @@ function localTrack(x) {
     disc: x.disc || 1,
     year: x.year || null,
     genre: x.genre || null,
+    tags: x.genre ? x.genre.split(/\s*[;,/]\s*/).map(norm).filter(Boolean) : [],
     quality: q,
     lossless: LOSSLESS.has(x.codec),
     bits: x.bitDepth || null,
@@ -154,6 +155,7 @@ function iaTrack(item, t) {
     duration: Math.round((t.duration || 0) * 1000),
     number: t.number,
     quality: t.format,
+    tags: item.subjects || [],
     lossless: true,
     // the Archive labels 24-bit masters separately; its plain "Flac" files are 16-bit
     bits: /24/.test(t.format) ? 24 : 16,
@@ -172,6 +174,7 @@ function wcTrack(t) {
     image: null,
     duration: Math.round((t.duration || 0) * 1000),
     quality: [t.format, t.license].filter(Boolean).join(' · '),
+    tags: t.tags || [],
     lossless: true,
     bits: t.bitDepth || null,
     rate: t.sampleRate || null,
@@ -241,7 +244,7 @@ async function bestVersions(term) {
 
 // ===================================================================== library (likes, playlists, history) — local JSON
 const LIB = { data: { liked: [], albums: [], playlists: [], recent: [] }, liked: new Set(), timer: null };
-const slimTrack = (t) => ({ uri: t.uri, source: t.source, src: t.src, name: t.name, artists: t.artists, album: t.album, image: t.image, duration: t.duration, quality: t.quality || '', genre: t.genre || null });
+const slimTrack = (t) => ({ uri: t.uri, source: t.source, src: t.src, name: t.name, artists: t.artists, album: t.album, image: t.image, duration: t.duration, quality: t.quality || '', genre: t.genre || null, tags: t.tags || [], lossless: !!t.lossless, bits: t.bits || null, rate: t.rate || null });
 
 function reindex() { LIB.liked = new Set(LIB.data.liked.map((t) => t.uri)); }
 async function libLoad() {
@@ -262,8 +265,8 @@ function libSave() {
 const isLiked = (uri) => LIB.liked.has(uri);
 function toggleLike(t) {
   if (!t || !t.uri) return;
-  if (isLiked(t.uri)) { LIB.data.liked = LIB.data.liked.filter((x) => x.uri !== t.uri); toast('Removed from Liked songs'); }
-  else { LIB.data.liked.unshift(slimTrack(t)); toast('Added to Liked songs'); }
+  if (isLiked(t.uri)) { LIB.data.liked = LIB.data.liked.filter((x) => x.uri !== t.uri); toast('Removed from Liked songs'); recordLike(t, false); }
+  else { LIB.data.liked.unshift(slimTrack(t)); toast('Added to Liked songs'); recordLike(t, true); }
   libSave();
   syncLikeButtons();
 }
@@ -301,6 +304,7 @@ async function loadIndex(i, autoplay = true) {
   try {
     Q.seq = await invoke('player_load', { src: t.src, autoplay });
   } catch (e) { fail(e); }
+  topUpAutoplay();
 }
 function playList(tracks, i = 0) {
   if (!tracks.length) return;
@@ -330,48 +334,24 @@ function queueAdd(tracks, next = false) {
 
 async function next(auto = false) {
   if (!current()) return;
+  // teach autoplay: finished (good), skipped early (bad), or listened a while
+  const st = S.player;
+  if (st && st.seq === Q.seq && st.status !== 'error') recordListen(current(), { ended: auto && st.status === 'ended', position: st.position || 0 });
   if (auto && Q.repeat === 2) return loadIndex(Q.i);
   if (Q.i + 1 < Q.list.length) return loadIndex(Q.i + 1);
   if (Q.repeat === 1) return loadIndex(0);
-  // end of the queue: keep the music going
-  const more = await radioPicks(current());
-  if (more.length) {
-    Q.list.push(...more.map((t) => ({ ...t, radio: true })));
-    more.forEach((t) => Q.radioSeen.add(t.uri));
-    return loadIndex(Q.i + 1);
+  // end of the queue: autoplay keeps the music going
+  if (autoplayOn()) {
+    const at = Q.i;
+    await (REC.busy || topUpAutoplay());
+    if (Q.i === at && Q.i + 1 < Q.list.length) return loadIndex(Q.i + 1);
   }
-  if (!auto) toast('Nothing more to play');
+  if (!auto) toast(autoplayOn() ? 'Nothing more to play' : 'End of the queue · Autoplay is off');
 }
 function prev() {
   const s = S.player;
   if ((s && s.position > 3) || Q.i <= 0) return invoke('player_seek', { secs: 0 }).catch(fail);
   loadIndex(Q.i - 1);
-}
-
-// "keep playing": similar music — same artist, then same genre; archive: same creator, then live shelf
-async function radioPicks(seed) {
-  if (!seed) return [];
-  const fresh = (t) => !Q.radioSeen.has(t.uri);
-  if (seed.source === 'local') {
-    const seedArtists = new Set(seed.artists.map((a) => norm(a.name)));
-    const sameArtist = LOCAL.tracks.filter((t) => fresh(t) && t.artists.some((a) => seedArtists.has(norm(a.name))));
-    const sameGenre = seed.genre ? LOCAL.tracks.filter((t) => fresh(t) && norm(t.genre) === norm(seed.genre)) : [];
-    const picks = [...new Map([...shuffleArr(sameArtist).slice(0, 3), ...shuffleArr(sameGenre).slice(0, 5)].map((t) => [t.uri, t])).values()];
-    if (picks.length >= 5) return shuffleArr(picks);
-    return [...picks, ...shuffleArr(LOCAL.tracks.filter((t) => fresh(t) && !picks.includes(t))).slice(0, 8 - picks.length)];
-  }
-  try {
-    const creator = seed.artists[0] && seed.artists[0].name;
-    let items = creator ? await invoke('ia_search', { term: creator }) : [];
-    items = items.filter((it) => 'ia:' + it.id !== seed.album.key);
-    if (!items.length) items = await invoke('ia_shelf', { kind: 'live' });
-    for (const it of shuffleArr(items).slice(0, 4)) {
-      const d = await iaItem(it.id);
-      const tracks = d.tracks.map((t) => iaTrack(d, t)).filter(fresh);
-      if (tracks.length) return tracks;
-    }
-  } catch {}
-  return [];
 }
 
 // ===================================================================== router
@@ -642,6 +622,8 @@ const VIEWS = {
       h('div', { class: 'setting' }, h('div', {}, h('div', { class: 'label', text: 'Output' }),
         h('div', { class: 'fine', text: st.device ? `${st.device}${st.outRate ? ' · ' + (st.outRate / 1000).toFixed(1) + ' kHz' : ''}` : 'System default device' })),
         h('div', { class: 'fine', style: 'max-width:320px;text-align:right', text: 'Decoded natively in 32-bit float. Resampled with a high-quality sinc filter only when the source rate differs from the device.' }))));
+
+    out.append(section('Autoplay'), autoplaySettings());
 
     const soundBtn = h('button', { class: 'btn' }, introPrefs.sound ? 'On' : 'Off');
     soundBtn.onclick = () => { introPrefs.sound = !introPrefs.sound; soundBtn.textContent = introPrefs.sound ? 'On' : 'Off'; };
@@ -932,8 +914,8 @@ function refreshQueue() {
   if (cur) block('Now playing', [{ t: cur, i: Q.i }]);
   const after = Q.list.slice(Q.i + 1).map((t, k) => ({ t, i: Q.i + 1 + k }));
   block('Next up', after.filter((x) => !x.t.radio));
-  block('Keep playing · similar', after.filter((x) => x.t.radio));
-  if (!kids.length) kids.push(h('p', { class: 'fine', style: 'padding:10px', text: 'Play something to see what comes next. When the queue ends, Miek keeps going with similar music.' }));
+  block('Autoplay · picked for you', after.filter((x) => x.t.radio));
+  if (!kids.length) kids.push(h('p', { class: 'fine', style: 'padding:10px', text: 'Play something to see what comes next. When the queue ends, Autoplay keeps going with songs picked for you.' }));
   $('queue-list').replaceChildren(...kids);
   markPlaying();
 }

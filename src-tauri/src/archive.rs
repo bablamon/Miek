@@ -31,6 +31,7 @@ pub struct ItemDetail {
     #[serde(flatten)]
     item: Item,
     description: Option<String>,
+    subjects: Vec<String>,
     tracks: Vec<Track>,
 }
 
@@ -91,6 +92,37 @@ pub async fn ia_search(term: String) -> Result<Vec<Item>, String> {
         return Ok(vec![]);
     }
     query(&format!("({clean}) AND mediatype:(audio OR etree) AND {LOSSLESS}"), 36).await
+}
+
+/// Genre/subject tags, lower-cased; drops tags that say nothing about the music.
+fn subjects(v: &Value) -> Vec<String> {
+    let raw: Vec<String> = match v {
+        Value::String(s) => vec![s.clone()],
+        Value::Array(a) => a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect(),
+        _ => vec![],
+    };
+    let mut out: Vec<String> = vec![];
+    for t in raw.iter().flat_map(|s| s.split([';', ','])) {
+        let t = t.trim().to_lowercase();
+        if t.len() < 3 || t.len() > 40 || matches!(t.as_str(), "live concert" | "live music" | "live" | "music" | "audio" | "concert" | "netlabel" | "netlabels") {
+            continue;
+        }
+        if !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    out.truncate(10);
+    out
+}
+
+/// Lossless items carrying a subject tag (for recommendations).
+#[tauri::command]
+pub async fn ia_subject(subject: String) -> Result<Vec<Item>, String> {
+    let clean: String = subject.chars().filter(|c| !"():\"\\[]{}^~*?".contains(*c)).collect();
+    if clean.trim().is_empty() {
+        return Ok(vec![]);
+    }
+    query(&format!("subject:\"{}\" AND mediatype:(audio OR etree) AND {LOSSLESS}", clean.trim()), 30).await
 }
 
 /// Curated shelves for the Explore page.
@@ -213,5 +245,5 @@ pub async fn ia_item(id: String) -> Result<ItemDetail, String> {
         .collect();
     tracks.sort_by(|a, b| (a.number == 0, a.number, &a.url).cmp(&(b.number == 0, b.number, &b.url)));
     let description = text(&md["description"]).map(|d| plain_text(&d));
-    Ok(ItemDetail { item, description, tracks })
+    Ok(ItemDetail { item, description, subjects: subjects(&md["subject"]), tracks })
 }

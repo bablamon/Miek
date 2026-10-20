@@ -18,6 +18,7 @@ pub struct Track {
     bit_depth: Option<u32>,
     format: String,
     license: Option<String>,
+    tags: Vec<String>,
 }
 
 /// getID3 metadata is a tree of {name, value}; find a numeric value by name anywhere in it.
@@ -39,6 +40,27 @@ fn find_num(md: &Value, key: &str) -> Option<u64> {
 
 fn ext(vi: &Value, key: &str) -> Option<String> {
     vi["extmetadata"][key]["value"].as_str().map(crate::archive::plain_text).map(|s| s.lines().next().unwrap_or("").to_string()).filter(|s| !s.is_empty())
+}
+
+/// Commons categories as music tags: genre/form categories and the composer, not licences or file housekeeping.
+fn tags(categories: &str) -> Vec<String> {
+    let mut out = vec![];
+    for c in categories.split('|') {
+        let c = c.trim().replace('_', " ");
+        let lc = c.to_lowercase();
+        let tag = if let Some(who) = lc.strip_prefix("audio files of music by ") {
+            who.to_string()
+        } else if lc.starts_with("pd") || lc.starts_with("cc-") || lc.contains("license") || lc.contains("files") || lc.contains("upload") || lc.contains("musopen") || lc.contains("self-published") {
+            continue;
+        } else {
+            lc
+        };
+        if tag.len() >= 3 && !out.contains(&tag) {
+            out.push(tag);
+        }
+    }
+    out.truncate(10);
+    out
 }
 
 fn to_track(page: &Value) -> Option<Track> {
@@ -71,6 +93,7 @@ fn to_track(page: &Value) -> Option<Track> {
         bit_depth,
         format,
         license: ext(vi, "LicenseShortName"),
+        tags: tags(vi["extmetadata"]["Categories"]["value"].as_str().unwrap_or("")),
     })
 }
 
