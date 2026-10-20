@@ -1,4 +1,5 @@
-// Miek UI. Sources: your own music files + the Internet Archive (lossless, no account).
+// Miek UI. Sources: Soulseek (results the user picks from), your own music files, the Internet Archive
+// and Wikimedia Commons. Each source is shown on its own; Miek never picks or swaps a version for you.
 // Audio is decoded and played by Miek's native engine (Rust); this file drives it.
 const { invoke, convertFileSrc } = window.__TAURI__.core;
 const appWindow = window.__TAURI__.window.getCurrentWindow();
@@ -54,6 +55,7 @@ function mosaic(images, cls = 'thumb') {
   return h('div', { class: cls + ' mosaic' }, imgs.map((s) => img(s)));
 }
 function artistLinks(t) {
+  if (t.slsk) return h('span', { text: `${t.folder ? t.folder + ' · ' : ''}from ${t.slsk.user}` });
   const span = h('span', {});
   (t.artists || []).forEach((a, i) => {
     if (i) span.append(', ');
@@ -187,11 +189,8 @@ function iaItem(id) {
   return IA_CACHE.get(id);
 }
 
-// ===================================================================== best version: one song, every source, best lossless copy first
-const SOURCE_NAMES = { local: 'Your music', ia: 'Internet Archive', commons: 'Wikimedia Commons' };
+// ===================================================================== song words (used by Autoplay to spot the same song twice)
 const words = (s) => norm(s).replace(/[^\p{L}\p{N}]+/gu, ' ').split(' ').filter((w) => w.length > 1);
-// does the track contain every word of the search (title + artists)?
-const matches = (t, q) => { const have = new Set(words(t.name + ' ' + t.artists.map((a) => a.name).join(' '))); return q.length && q.every((w) => have.has(w)); };
 // a song's identifying words: no "Composer - " prefix, bracketed notes, leading track number,
 // artist names or filler words. Opus/movement numbers stay, so different works stay apart.
 const FILLER = new Set(['op', 'no', 'nr', 'in', 'the', 'of', 'and', 'live']);
@@ -201,50 +200,177 @@ function songWords(t) {
   const w = words(title).filter((x) => !artist.has(x) && !FILLER.has(x));
   return w.length ? w : words(t.name);
 }
-// same song if one title's words contain the other's and cover at least half of it
-// ("Coriolan Overture" = "Coriolan Overture Op. 62", but not a long title that merely mentions it)
-function sameSong(a, b) {
-  const [small, big] = a.length <= b.length ? [a, b] : [b, a];
-  if (small.length * 2 < big.length) return false;
-  if (small.length < 2) return small.length === big.length && small[0] === big[0];
-  const set = new Set(big);
-  return small.every((x) => set.has(x));
+
+// ===================================================================== Soulseek (files shared by other people)
+// A search shows what peers actually answered, in the order they answered. The user picks one;
+// playing it streams that exact file from that peer (it plays while it arrives).
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const fmtSize = (b) => (b >= 1 << 30 ? `${(b / (1 << 30)).toFixed(2)} GB` : b >= 1 << 20 ? `${(b / (1 << 20)).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`);
+const fmtRate = (r) => `${+(r / 1000).toFixed(1)} kHz`;
+function slskQuality(x) {
+  if (x.bitDepth && x.sampleRate) return `${x.bitDepth}-bit / ${fmtRate(x.sampleRate)}`;
+  if (x.bitrate) return `${x.bitrate} kbps${x.vbr ? ' VBR' : ''}${x.sampleRate ? ' · ' + fmtRate(x.sampleRate) : ''}`;
+  return x.sampleRate ? fmtRate(x.sampleRate) : '';
 }
-// higher is better: lossless, then bit depth, then sample rate; your own file wins a tie (no streaming)
-function better(a, b) {
-  return (b.lossless ? 1 : 0) - (a.lossless ? 1 : 0) || (b.bits || 0) - (a.bits || 0) || (b.rate || 0) - (a.rate || 0) || (a.source === 'local' ? -1 : 0) - (b.source === 'local' ? -1 : 0);
+function slskTrack(x) {
+  const parts = x.file.split(/[\\/]/).filter(Boolean);
+  const base = parts.pop() || x.file;
+  return {
+    uri: 'slsk:' + x.user + '\n' + x.file,
+    source: 'slsk',
+    src: { kind: 'slsk', value: x.user + '\n' + x.file }, // the real transfer id is made at play time
+    slsk: { user: x.user, file: x.file, latin1: !!x.latin1, size: x.size },
+    name: base.replace(/\.[^.]+$/, ''),
+    folder: parts.slice(-2).join(' / '),
+    artists: [],
+    album: null,
+    image: null,
+    duration: (x.duration || 0) * 1000,
+    quality: [x.ext.toUpperCase(), slskQuality(x)].filter(Boolean).join(' '),
+    tags: [],
+    lossless: ['flac', 'wav', 'aif', 'aiff', 'aifc'].includes(x.ext),
+    bits: x.bitDepth || null,
+    rate: x.sampleRate || null,
+  };
 }
-async function bestVersions(term) {
-  const q = words(term);
-  const local = LOCAL.tracks.filter((t) => t.lossless && matches(t, q));
-  const [commons, archive] = await Promise.all([
-    invoke('commons_search', { term }).then((r) => r.map(wcTrack)).catch(() => []),
-    // songs inside the top Archive results
-    invoke('ia_search', { term })
-      .then((items) => Promise.all(items.slice(0, 3).map((it) => iaItem(it.id).then((d) => d.tracks.map((t) => iaTrack(d, t))).catch(() => []))))
-      .then((lists) => lists.flat())
-      .catch(() => []),
-  ]);
-  const groups = [];
-  for (const t of [...local, ...commons, ...archive].filter((t) => matches(t, q))) {
-    const w = songWords(t);
-    const g = groups.find((g) => sameSong(g.words, w));
-    if (g) g.versions.push(t);
-    else groups.push({ words: w, versions: [t] });
+function slskStateText(x) {
+  if (!x) return 'Soulseek';
+  switch (x.state) {
+    case 'connecting': return `Connecting to ${x.user}`;
+    case 'requested': return `Asking ${x.user}`;
+    case 'queued': return `Queued${x.place != null ? ' #' + x.place : ''} at ${x.user}`;
+    case 'transferring': return `↓ ${x.size ? Math.floor((100 * x.received) / x.size) : 0}%`;
+    case 'done': return `From ${x.user}`;
+    case 'failed': return 'Failed';
+    default: return 'Cancelled';
   }
-  return groups.map((g) => {
-    g.versions.sort(better);
-    const [best, ...rest] = g.versions;
-    const note = `${SOURCE_NAMES[best.source]}${rest.length ? ` · best of ${g.versions.length} versions` : ''}`;
-    // relevance: how much of the song's title the search covers (in quarters, so quality decides close calls)
-    const rel = Math.round((4 * Math.min(q.length, g.words.length)) / Math.max(q.length, g.words.length));
-    return { ...best, quality: [best.quality, note].filter(Boolean).join(' · '), alternates: rest, rel };
-  }).sort((a, b) => b.rel - a.rel || better(a, b)).slice(0, 12);
+}
+function slskNote(st) {
+  const msg = st.state === 'off' ? 'Soulseek is off. Turn it on to search files other people share.'
+    : st.state === 'connecting' ? 'Still connecting to Soulseek…'
+    : `Soulseek isn’t connected: ${st.error || 'unknown error'}`;
+  return h('div', { class: 'slsk-note' }, h('span', { text: msg }), h('button', { class: 'btn', onclick: () => go('settings') }, icon('settings', 15), 'Soulseek settings'));
+}
+// live results: filled in as peers answer, until the search runs out or the user leaves the page
+function soulseekResults(term) {
+  const box = h('div', {}, h('p', { class: 'fine', text: 'Searching Soulseek…' }));
+  const mine = go.token; // the view being built belongs to this navigation
+  const live = () => go.token === mine;
+  (async () => {
+    let st = await invoke('slsk_status');
+    for (let i = 0; st.state === 'connecting' && i < 30 && live(); i++) { await sleep(500); st = await invoke('slsk_status'); }
+    if (!live()) return;
+    if (st.state !== 'online') return box.replaceChildren(slskNote(st));
+    // the page is rebuilt when your music rescans: show the same search again rather than a new one
+    const last = soulseekResults.last;
+    let token = last && last.term === term && Date.now() - last.at < 5 * 60e3 ? last.token : null;
+    if (token == null) {
+      try { token = await invoke('slsk_search', { query: term }); } catch (e) { return box.replaceChildren(h('p', { class: 'fine', text: String(e) })); }
+      soulseekResults.last = { term, token, at: Date.now() };
+    }
+    const hits = [];
+    const users = new Set();
+    const head = h('div', { class: 'slsk-row slsk-head' }, h('span'), h('span', { text: 'File' }), h('span', { text: 'User' }), h('span', { text: 'Format' }), h('span', { text: 'Length' }), h('span', { text: 'Size' }));
+    const rows = h('div', {});
+    const count = h('p', { class: 'fine' });
+    let shown = 200;
+    let done = false;
+    const more = h('button', { class: 'btn hidden', text: 'Show more', onclick: () => { shown += 200; render(); } });
+    const render = () => {
+      for (let i = rows.childElementCount; i < Math.min(hits.length, shown); i++) rows.append(slskRow(hits[i]));
+      count.textContent = hits.length ? `${plural(hits.length, 'file')} from ${plural(users.size, 'user')}, in the order they answered${done ? '' : ' · still searching…'}` : done ? 'No one answered with a playable file.' : 'Waiting for answers…';
+      more.classList.toggle('hidden', hits.length <= shown);
+      markPlaying();
+    };
+    box.replaceChildren(count, h('div', { class: 'tracks slsk-table' }, head, rows), more);
+    render();
+    while (live() && !done) {
+      await sleep(700);
+      try {
+        const r = await invoke('slsk_results', { token, from: hits.length });
+        for (const x of r.hits) { hits.push({ ...slskTrack(x), hit: x }); users.add(x.user); }
+        done = r.done;
+      } catch { done = true; }
+      if (live()) render();
+    }
+  })().catch((e) => box.replaceChildren(h('p', { class: 'fine', text: String(e) })));
+  return box;
+}
+function slskRow(t) {
+  const x = t.hit;
+  const play = () => playOne(t);
+  const row = h('div', { class: 'trow slsk-row', 'data-uri': t.uri, ondblclick: play, oncontextmenu: (e) => { e.preventDefault(); trackMenu(e, t, 0, {}, row); } },
+    h('div', { class: 't-idx', onclick: play, title: 'Play this file' }, icon('play', 14)),
+    h('div', { class: 't-text', title: x.file }, h('div', { class: 't-name', text: t.name + (x.ext ? '.' + x.ext : '') }), h('div', { class: 't-sub', text: t.folder || x.file })),
+    h('div', { class: 't-text', title: `${x.slotFree ? 'Free upload slot' : 'No free upload slot'} · ${x.queue} queued · ${fmtSize(x.speed)}/s average` },
+      h('div', { class: 't-sub', text: x.user }), h('div', { class: 'fine', text: x.slotFree ? 'slot free' : `${x.queue} in queue` })),
+    h('div', { class: 't-text' }, h('div', { class: 't-sub', text: x.ext.toUpperCase() }), h('div', { class: 'fine', text: slskQuality(x) || '—' })),
+    h('div', { class: 't-dur', text: x.duration ? fmt(x.duration * 1000) : '—' }),
+    h('div', { class: 't-dur', text: fmtSize(x.size) }));
+  return row;
+}
+
+// The stream being played: start (or reuse) the transfer, wait until the first part has arrived,
+// then hand it to the player. Returns null when the user moved on or cancelled meanwhile.
+const SL = { id: null, uri: null, info: null, waiting: false, wait: 0 };
+async function slskPrepare(t) {
+  const mine = ++SL.wait;
+  const { user, file, latin1, size } = t.slsk;
+  Object.assign(SL, { id: null, uri: t.uri, info: { state: 'connecting', user }, waiting: true });
+  try {
+    const id = await invoke('slsk_stream', { user, file, latin1, size, keep: false });
+    if (mine !== SL.wait) { invoke('slsk_cancel', { id }).catch(() => {}); return null; }
+    SL.id = id;
+    for (;;) {
+      if (mine !== SL.wait || current() !== t) return null;
+      const x = (SL.info = await invoke('slsk_transfer', { id }));
+      if (x.state === 'failed') throw new Error(`Soulseek · ${x.error}`);
+      if (x.state === 'cancelled') return null;
+      if (x.state === 'done' || x.received >= Math.min(x.size, 256 * 1024)) return id;
+      await sleep(250);
+    }
+  } finally {
+    if (mine === SL.wait) SL.waiting = false;
+  }
+}
+function slskCancelWait() {
+  if (!SL.waiting) return false;
+  SL.wait++;
+  SL.waiting = false;
+  if (SL.id) invoke('slsk_cancel', { id: SL.id }).catch(() => {});
+  toast('Stopped waiting for that file');
+  return true;
+}
+// "Download to your music" (optional): keeps the file in Music\Miek Soulseek and adds that folder to your music
+const DL = new Set();
+async function slskDownload(t) {
+  const { user, file, latin1, size } = t.slsk;
+  if (DL.has(t.uri)) return toast('Already downloading that file');
+  DL.add(t.uri);
+  toast(`Downloading “${t.name}” from ${user}`);
+  try {
+    const id = await invoke('slsk_stream', { user, file, latin1, size, keep: true });
+    for (;;) {
+      const x = await invoke('slsk_transfer', { id });
+      if (x.state === 'failed') throw new Error(`Soulseek · ${x.error}`);
+      if (x.state === 'cancelled') throw new Error('Download cancelled');
+      if (x.state === 'done') break;
+      await sleep(1000);
+    }
+    const saved = await invoke('slsk_save', { id });
+    if (!LOCAL.folders.includes(saved.folder)) {
+      LOCAL.folders = [...LOCAL.folders, saved.folder];
+      await invoke('local_set_folders', { folders: LOCAL.folders });
+    }
+    toast(`Saved “${t.name}” to your music`);
+    rescan();
+  } catch (e) { fail(e); }
+  DL.delete(t.uri);
 }
 
 // ===================================================================== library (likes, playlists, history) — local JSON
 const LIB = { data: { liked: [], albums: [], playlists: [], recent: [] }, liked: new Set(), timer: null };
-const slimTrack = (t) => ({ uri: t.uri, source: t.source, src: t.src, name: t.name, artists: t.artists, album: t.album, image: t.image, duration: t.duration, quality: t.quality || '', genre: t.genre || null, tags: t.tags || [], lossless: !!t.lossless, bits: t.bits || null, rate: t.rate || null });
+const slimTrack = (t) => ({ uri: t.uri, source: t.source, src: t.src, slsk: t.slsk || null, folder: t.folder || null, name: t.name, artists: t.artists, album: t.album, image: t.image, duration: t.duration, quality: t.quality || '', genre: t.genre || null, tags: t.tags || [], lossless: !!t.lossless, bits: t.bits || null, rate: t.rate || null });
 
 function reindex() { LIB.liked = new Set(LIB.data.liked.map((t) => t.uri)); }
 async function libLoad() {
@@ -302,7 +428,17 @@ async function loadIndex(i, autoplay = true) {
   Q.i = i;
   onTrackChange(t);
   try {
-    Q.seq = await invoke('player_load', { src: t.src, autoplay });
+    if (t.slsk) {
+      Q.seq = -1; // the previous track's end/error must not move the queue while we wait
+      if (S.player && S.player.status === 'playing') invoke('player_toggle').catch(() => {});
+      const id = await slskPrepare(t);
+      if (id == null) return;
+      Q.seq = await invoke('player_load', { src: { kind: 'slsk', value: id }, autoplay });
+    } else {
+      SL.wait++;
+      invoke('slsk_stop_streams').catch(() => {});
+      Q.seq = await invoke('player_load', { src: t.src, autoplay });
+    }
   } catch (e) { fail(e); }
   prefetchNext();
   topUpAutoplay();
@@ -511,7 +647,7 @@ const VIEWS = {
     const songs = LOCAL.tracks.filter((t) => norm(t.name).includes(q) || t.artists.some((a) => norm(a.name).includes(q)) || norm(t.album.name).includes(q)).slice(0, 12);
     const albums = LOCAL.albums.filter((a) => norm(a.name).includes(q) || norm(a.artist).includes(q)).slice(0, 16);
     const artists = [...LOCAL.byArtist.values()].filter((a) => norm(a.name).includes(q)).slice(0, 12);
-    out.append(section('Best versions'), lazyTracks(() => bestVersions(term), 'Lossless sources'));
+    out.append(section('Soulseek'), soulseekResults(term));
     if (songs.length) out.append(section('Your songs'), trackList(songs, (i) => playList(songs, i)));
     if (artists.length) out.append(section('Your artists'), shelf(artists.map(artistCard)));
     if (albums.length) out.append(section('Your albums'), shelf(albums.map((a) => albumCard(localAlbumCard(a)))));
@@ -630,6 +766,7 @@ const VIEWS = {
         h('div', { class: 'fine', text: st.device ? `${st.device}${st.outRate ? ' · ' + (st.outRate / 1000).toFixed(1) + ' kHz' : ''}` : 'System default device' })),
         h('div', { class: 'fine', style: 'max-width:320px;text-align:right', text: 'Decoded natively in 32-bit float. Resampled with a high-quality sinc filter only when the source rate differs from the device.' }))));
 
+    out.append(section('Soulseek'), soulseekSettings());
     out.append(section('Autoplay'), autoplaySettings());
 
     const soundBtn = h('button', { class: 'btn' }, introPrefs.sound ? 'On' : 'Off');
@@ -639,10 +776,44 @@ const VIEWS = {
       h('div', { class: 'setting' }, h('div', {}, h('div', { class: 'label', text: 'Replay intro' })), h('button', { class: 'btn', onclick: () => playIntro() }, 'Play'))));
 
     out.append(section('About'), h('div', { class: 'panel' },
-      h('div', { class: 'setting' }, h('div', {}, h('div', { class: 'label', text: 'Miek 0.3.0' }), h('div', { class: 'fine', text: 'Open source · MIT license · no accounts, no ads, no tracking. Sources: your files, the Internet Archive and Wikimedia Commons.' })))));
+      h('div', { class: 'setting' }, h('div', {}, h('div', { class: 'label', text: 'Miek 0.3.0' }), h('div', { class: 'fine', text: 'Open source · MIT license · no accounts, no ads, no tracking. Sources: Soulseek, your files, the Internet Archive and Wikimedia Commons.' })))));
     return out;
   },
 };
+
+// ===================================================================== Soulseek settings
+function soulseekSettings() {
+  const panel = h('div', { class: 'panel' });
+  const user = h('input', { class: 'field', maxlength: '30', placeholder: 'Picked for you', spellcheck: 'false', 'aria-label': 'Soulseek username' });
+  const pass = h('input', { class: 'field', type: 'password', placeholder: 'Picked for you', spellcheck: 'false', 'aria-label': 'Soulseek password' });
+  const status = h('div', { class: 'fine' });
+  const toggle = h('button', { class: 'btn' }, '…');
+  let cfg = { enabled: false, username: '', password: '' };
+  const showStatus = async () => {
+    const st = await invoke('slsk_status').catch(() => null);
+    if (!st || !panel.isConnected) return;
+    status.textContent = st.state === 'online' ? `Signed in as ${st.username} · listening on port ${st.port}`
+      : st.state === 'connecting' ? 'Connecting…' : st.state === 'off' ? 'Off' : st.error || 'Not connected';
+    if (st.state === 'connecting') setTimeout(showStatus, 700);
+  };
+  const show = (c) => { cfg = c; user.value = c.username; pass.value = c.password; toggle.textContent = c.enabled ? 'On' : 'Off'; };
+  const save = async (enabled) => {
+    try {
+      show(await invoke('slsk_config_set', { enabled, username: user.value, password: pass.value }));
+      soulseekResults.last = null; // reconnecting forgets earlier searches
+      setTimeout(showStatus, 150);
+    } catch (e) { fail(e); }
+  };
+  toggle.onclick = () => save(!cfg.enabled);
+  invoke('slsk_config_get').then((c) => { show(c); showStatus(); }).catch(fail);
+  panel.append(
+    h('div', { class: 'setting' }, h('div', {}, h('div', { class: 'label', text: 'Search and play from Soulseek' }), status), toggle),
+    h('div', { class: 'setting' }, h('div', {}, h('div', { class: 'label', text: 'Soulseek name' }),
+      h('div', { class: 'fine', text: 'Soulseek registers a name the first time it signs in. Keep the password to use the same name again.' })),
+      h('div', { class: 'slsk-account' }, user, pass, h('button', { class: 'btn', onclick: () => save(cfg.enabled) }, 'Save'))),
+    h('div', { class: 'setting' }, h('div', { class: 'fine', style: 'max-width:640px', text: 'Soulseek is a peer-to-peer network: files come straight from other people’s computers. A search lists what they answer; you choose the file, and it plays while it downloads. Miek shares nothing back, and some people only upload to users who share. Only play and download music you have the right to. If Windows asks, allowing Miek through the firewall lets more people reach you.' })));
+  return panel;
+}
 
 // ===================================================================== sidebar
 function renderSidebar() {
@@ -670,7 +841,9 @@ $('search').addEventListener('keydown', (e) => { if (e.key === 'Escape') { $('se
 // ===================================================================== menus & dialogs
 function openMenu(e, items, anchorRow) {
   const m = $('menu');
-  m.replaceChildren(...items.filter(Boolean).map((it) => {
+  const list = items.filter(Boolean);
+  while (list[list.length - 1] === '-') list.pop();
+  m.replaceChildren(...list.map((it) => {
     if (it === '-') return h('div', { class: 'msep' });
     if (it.label) return h('div', { class: 'mlabel', text: it.label });
     return h('button', { class: 'mi', disabled: it.disabled, onclick: () => { closeMenu(); it.run && Promise.resolve(it.run()).catch(fail); } }, it.icon ? icon(it.icon, 16) : null, h('span', { text: it.text }));
@@ -705,6 +878,7 @@ function trackMenu(e, t, i, opts, row) {
     { icon: 'queue', text: 'Add to queue', run: () => { queueAdd([t]); toast('Added to queue'); } },
     { icon: 'heart', text: isLiked(t.uri) ? 'Remove from Liked songs' : 'Add to Liked songs', run: () => toggleLike(t) },
     { icon: 'plus', text: 'Add to playlist…', run: () => playlistPicker(e, [t]) },
+    t.slsk ? { icon: 'download', text: 'Download to your music', run: () => slskDownload(t) } : null,
     ...(opts.extraMenu ? opts.extraMenu(t, i) : []),
     '-',
     t.album ? { icon: 'disc', text: 'Go to album', run: () => go('album', t.album.key) } : null,
@@ -782,17 +956,24 @@ async function pollState() {
   const busy = s.status === 'playing' || s.status === 'loading';
   $('play').replaceChildren(icon(busy ? 'pause' : 'play', 20));
   $('play').title = busy ? 'Pause' : 'Play';
-  $('play').classList.toggle('loading', s.status === 'loading');
+  $('play').classList.toggle('loading', s.status === 'loading' || SL.waiting);
+  if (SL.waiting) $('play').title = 'Stop waiting';
+  const cur0 = current();
+  if (cur0 && cur0.slsk && SL.uri === cur0.uri && SL.id && !SL.waiting && (!SL.info || SL.info.state !== 'done')) {
+    SL.info = await invoke('slsk_transfer', { id: SL.id }).catch(() => SL.info);
+  }
   $('prev').disabled = !current();
   $('next').disabled = !current();
   $('np-like').disabled = !current();
+  // Q.seq -1: a Soulseek file is selected but not loaded (waiting, or it failed); the engine still holds the old track
+  const loaded = Q.seq !== -1;
   if (!seeking) {
-    const f = s.duration ? s.position / s.duration : 0;
+    const f = loaded && s.duration ? s.position / s.duration : 0;
     $('seek').value = Math.round(f * 1000);
     setRange($('seek'), f);
-    $('pos').textContent = fmt(s.position * 1000);
+    $('pos').textContent = fmt(loaded ? s.position * 1000 : 0);
   }
-  $('dur').textContent = fmt((s.duration || (current() && current().duration / 1000) || 0) * 1000);
+  $('dur').textContent = fmt(((loaded && s.duration) || (current() && current().duration / 1000) || 0) * 1000);
   if (!volDrag) {
     $('volume').value = Math.round(s.volume * 100);
     setRange($('volume'), s.volume);
@@ -800,24 +981,27 @@ async function pollState() {
   }
   // source format → output, e.g. "FLAC 24/96 → 48"
   const qb = $('quality');
-  if (s.codec && current() && s.seq === Q.seq) {
+  const slskNow = cur0 && cur0.slsk && SL.uri === cur0.uri ? SL.info : null;
+  if (SL.waiting && slskNow) {
+    qb.textContent = slskStateText(slskNow);
+    qb.title = `Soulseek · ${cur0.slsk.file}`;
+    qb.classList.remove('hidden');
+  } else if (s.codec && current() && s.seq === Q.seq) {
     const src = s.codec.toUpperCase() + (s.bitDepth ? ` ${s.bitDepth}/${+(s.sampleRate / 1000).toFixed(1)}` : ` ${+(s.sampleRate / 1000).toFixed(1)}k`);
     const resampled = s.outRate && s.outRate !== s.sampleRate;
-    qb.textContent = resampled ? `${src} → ${+(s.outRate / 1000).toFixed(1)}` : src;
-    qb.title = `Source ${src} · output ${s.device || 'default device'} at ${(s.outRate / 1000).toFixed(1)} kHz${resampled ? ' (high-quality resampling)' : ' (no resampling)'}`;
+    qb.textContent = (resampled ? `${src} → ${+(s.outRate / 1000).toFixed(1)}` : src) + (slskNow && slskNow.state !== 'done' ? ` · ${slskStateText(slskNow)}` : '');
+    const arriving = slskNow && slskNow.state !== 'done' ? `\nSoulseek · ${slskNow.user}${slskNow.speed ? ' · ' + fmtSize(slskNow.speed) + '/s' : ''} · ${fmtSize(slskNow.received)} of ${fmtSize(slskNow.size)}` : '';
+    qb.title = `Source ${src} · output ${s.device || 'default device'} at ${(s.outRate / 1000).toFixed(1)} kHz${resampled ? ' (high-quality resampling)' : ' (no resampling)'}${arriving}`;
     qb.classList.remove('hidden');
   } else qb.classList.add('hidden');
   if ((s.status === 'ended' || s.status === 'error') && s.seq === Q.seq && S.handledSeq !== s.seq) {
     S.handledSeq = s.seq;
     const cur = current();
-    if (s.status === 'error' && cur && cur.alternates && cur.alternates.length) {
-      // the best source failed: stream the next-best version of the same song instead
-      const [alt, ...rest] = cur.alternates;
-      Q.list[Q.i] = { ...alt, alternates: rest };
-      toast(`Couldn’t stream from ${SOURCE_NAMES[cur.source] || 'that source'}; trying ${SOURCE_NAMES[alt.source] || 'another source'}`);
-      loadIndex(Q.i);
-    } else if (s.status === 'error') { toast(`Couldn’t play “${cur ? cur.name : 'track'}”: ${s.error || 'unknown error'}`); setTimeout(() => next(true), 900); }
-    else next(true);
+    // never swap in another version: report it; a Soulseek file stays put so the user can pick another result
+    if (s.status === 'error') {
+      toast(`Couldn’t play “${cur ? cur.name : 'track'}”: ${s.error || 'unknown error'}`);
+      if (!(cur && cur.slsk)) setTimeout(() => next(true), 900);
+    } else next(true);
   }
 }
 
@@ -864,6 +1048,8 @@ function applyAccent(image) {
 }
 
 $('play').onclick = () => {
+  if (slskCancelWait()) return;
+  if (current() && Q.seq === -1) return loadIndex(Q.i); // try that Soulseek file again
   if (!current()) { const r = LIB.data.recent[0]; return r ? playOne(r) : toast('Pick something to play'); }
   invoke('player_toggle').then(pollState).catch(fail);
 };
@@ -888,6 +1074,7 @@ seek.addEventListener('input', () => {
   if (S.player) $('pos').textContent = fmt((seek.value / 1000) * S.player.duration * 1000);
 });
 seek.addEventListener('change', () => {
+  if (Q.seq === -1) return void (seeking = false);
   const secs = S.player ? (seek.value / 1000) * S.player.duration : 0;
   invoke('player_seek', { secs }).catch(fail).finally(() => setTimeout(() => (seeking = false), 400));
 });

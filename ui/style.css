@@ -348,3 +348,16 @@ input[type="range"]:hover::-webkit-slider-thumb, input[type="range"]:active::-we
 @keyframes shimmer { 0%, 100% { opacity: 0.45; } 50% { opacity: 0.9; } }
 .playbtn.loading { animation: pulse 1s ease-in-out infinite; }
 @keyframes pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(243, 239, 231, 0.35); } 50% { box-shadow: 0 0 0 7px rgba(243, 239, 231, 0); } }
+
+/* ---------------------------------------------------------------- Soulseek results */
+.slsk-row { grid-template-columns: 34px minmax(0, 6fr) minmax(0, 2fr) minmax(0, 2fr) 56px 72px; }
+.slsk-head { display: grid; gap: 14px; padding: 0 12px 6px; color: var(--ink-3); font-size: 11.5px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; border-bottom: 1px solid var(--hair); margin-bottom: 4px; }
+.slsk-head span:nth-child(n+5) { text-align: right; }
+.slsk-row .fine { font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.slsk-row .t-idx .icon { display: inline-grid; color: var(--ink-3); }
+.slsk-row:hover .t-idx .icon { color: var(--ink); }
+.slsk-note { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 18px; border: 1px solid var(--hair); border-radius: 14px; background: rgba(255, 255, 255, 0.03); color: var(--ink-2); }
+.slsk-account { display: flex; gap: 8px; }
+.field { width: 190px; height: 34px; border-radius: 10px; border: 1px solid var(--hair-2); background: rgba(0, 0, 0, 0.25); padding: 0 12px; outline: 0; font-size: 13.5px; }
+.field:focus { border-color: rgba(255, 255, 255, 0.35); }
+#quality { white-space: nowrap; }

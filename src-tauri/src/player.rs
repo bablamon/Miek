@@ -227,15 +227,15 @@ fn build<T: cpal::SizedSample + cpal::FromSample<f32>>(
 // prefetched (its first chunks) so it starts without waiting.
 // Finished downloads stay cached, so replays start immediately and work offline.
 
-struct Shared {
-    len: AtomicU64,
-    done: AtomicBool,
-    cancel: AtomicBool,
+pub(crate) struct Shared {
+    pub(crate) len: AtomicU64,
+    pub(crate) done: AtomicBool,
+    pub(crate) cancel: AtomicBool,
     failed: Mutex<Option<String>>,
     /// only fetch below this byte offset (a prefetch stops early); u64::MAX = everything
     limit: AtomicU64,
     /// sequential mode: bytes downloaded from the start
-    downloaded: AtomicU64,
+    pub(crate) downloaded: AtomicU64,
     /// chunked mode: claim state per chunk (0 to do, 1 in flight, 2 done) and bytes landed per chunk
     chunks: Option<Mutex<Vec<u8>>>,
     progress: Vec<AtomicU64>,
@@ -247,7 +247,7 @@ struct Shared {
 }
 
 impl Shared {
-    fn new(len: u64, chunked: bool) -> Self {
+    pub(crate) fn new(len: u64, chunked: bool) -> Self {
         let n = if chunked { chunk_count(len) } else { 0 };
         Shared {
             len: AtomicU64::new(len),
@@ -262,7 +262,7 @@ impl Shared {
             probing: AtomicBool::new(false),
         }
     }
-    fn fail(&self, e: &str) {
+    pub(crate) fn fail(&self, e: &str) {
         self.failed.lock().unwrap().get_or_insert_with(|| e.to_string());
     }
 }
@@ -275,6 +275,10 @@ struct StreamSource {
     pos: u64,
     side_start: u64,
     side: Vec<u8>,
+    /// the server takes byte ranges (far seeks fetch directly); Soulseek peers send front to back only
+    ranged: bool,
+    /// dropping this stops the download (Soulseek transfers are stopped by the UI instead)
+    owns: bool,
 }
 
 const AHEAD_WAIT: u64 = 3 * 1024 * 1024; // sequential mode: within this distance, wait for the download instead of a ranged request
@@ -301,14 +305,14 @@ fn cache_dir() -> std::path::PathBuf {
     let base = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
     base.join("Miek").join("stream-cache")
 }
-fn cache_path(url: &str) -> std::path::PathBuf {
+pub(crate) fn cache_path(url: &str) -> std::path::PathBuf {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     std::hash::Hash::hash(url, &mut h);
     cache_dir().join(format!("{:016x}", std::hash::Hasher::finish(&h)))
 }
 
 /// Keep the stream cache under ~2 GB by deleting the least recently used files.
-fn trim_cache() {
+pub(crate) fn trim_cache() {
     let Ok(rd) = std::fs::read_dir(cache_dir()) else { return };
     let mut files: Vec<_> = rd
         .flatten()
@@ -451,7 +455,7 @@ impl StreamSource {
                     let shared = Shared::new(len, false);
                     shared.downloaded.store(len, Ordering::SeqCst);
                     shared.done.store(true, Ordering::SeqCst);
-                    return Ok(StreamSource { file: f, shared: Arc::new(shared), client, url: url.to_string(), pos: 0, side_start: 0, side: vec![] });
+                    return Ok(StreamSource { file: f, shared: Arc::new(shared), client, url: url.to_string(), pos: 0, side_start: 0, side: vec![], ranged: true, owns: true });
                 }
             }
         }
@@ -515,7 +519,21 @@ impl StreamSource {
                 .spawn(move || sequential_download(sh, c, u, resp, writer, done_marker))
                 .map_err(|e| e.to_string())?;
         }
-        Ok(StreamSource { file: reader, shared, client, url: final_url, pos: 0, side_start: 0, side: vec![] })
+        Ok(StreamSource { file: reader, shared, client, url: final_url, pos: 0, side_start: 0, side: vec![], ranged: true, owns: true })
+    }
+
+    /// A Soulseek transfer landing in `path` (written by slsk.rs).
+    fn soulseek(path: std::path::PathBuf, shared: Arc<Shared>) -> Result<Self, String> {
+        let t = std::time::Instant::now();
+        // the transfer creates the file when the peer starts sending
+        let file = loop {
+            match std::fs::File::open(&path) {
+                Ok(f) => break f,
+                Err(_) if t.elapsed() < Duration::from_secs(5) => std::thread::sleep(Duration::from_millis(20)),
+                Err(e) => return Err(format!("Can't open the Soulseek stream: {e}")),
+            }
+        };
+        Ok(StreamSource { file, shared, client: http_client(), url: String::new(), pos: 0, side_start: 0, side: vec![], ranged: false, owns: false })
     }
 
     fn len(&self) -> u64 {
@@ -731,13 +749,16 @@ fn sequential_download(
 
 impl Drop for StreamSource {
     fn drop(&mut self) {
-        self.shared.cancel.store(true, Ordering::Relaxed);
+        if self.owns {
+            self.shared.cancel.store(true, Ordering::Relaxed);
+        }
     }
 }
 
 impl Read for StreamSource {
     fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
-        let waited = std::time::Instant::now();
+        let mut waited = std::time::Instant::now();
+        let mut seen = self.shared.downloaded.load(Ordering::SeqCst);
         let chunked = self.shared.chunks.is_some();
         loop {
             let len = self.len();
@@ -771,10 +792,16 @@ impl Read for StreamSource {
             if let Some(e) = self.shared.failed.lock().unwrap().clone() {
                 return Err(std::io::Error::other(e));
             }
-            if !chunked && self.pos >= self.shared.downloaded.load(Ordering::SeqCst) + AHEAD_WAIT {
+            let got = self.shared.downloaded.load(Ordering::SeqCst);
+            if !chunked && self.ranged && self.pos >= got + AHEAD_WAIT {
                 return self.side_read(out);
             }
-            if waited.elapsed() > Duration::from_secs(30) {
+            if !self.ranged && got != seen {
+                // front-to-back only: a seek ahead waits as long as the transfer keeps moving
+                seen = got;
+                waited = std::time::Instant::now();
+            }
+            if waited.elapsed() > Duration::from_secs(if self.ranged { 30 } else { 90 }) {
                 return Err(std::io::Error::other("Stream stalled"));
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -1017,6 +1044,19 @@ impl Engine {
                 // FLAC/Ogg readers re-check seekability on every seek, so it can be hidden while probing
                 let ext = src.value.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
                 if matches!(ext.as_str(), "flac" | "ogg" | "oga" | "opus") {
+                    s.shared.probing.store(true, Ordering::Relaxed);
+                    probing = Some(s.shared.clone());
+                }
+                Box::new(s)
+            }
+            "slsk" => {
+                let (path, shared, name) = crate::slsk::source(&src.value)?;
+                let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+                hint.with_extension(&ext);
+                let s = StreamSource::soulseek(path, shared)?;
+                // probing must not jump to the end of a file that is still arriving front to back
+                // (MP4 keeps its index at the end, so it has to stay seekable and wait)
+                if matches!(ext.as_str(), "flac" | "ogg" | "oga" | "mp3" | "wav" | "aif" | "aiff" | "aifc") {
                     s.shared.probing.store(true, Ordering::Relaxed);
                     probing = Some(s.shared.clone());
                 }
@@ -1267,4 +1307,36 @@ fn push_some(prod: &mut HeapProd<f32>, data: &[f32], backlog: &mut Vec<f32>) {
     }
     let n = prod.push_slice(data);
     backlog.extend_from_slice(&data[n..]);
+}
+
+/// Test helper: decode a Soulseek transfer through the same stream source the engine uses, while it
+/// is still arriving. Optionally seek first. Returns (frames decoded, sample rate, bit depth).
+#[cfg(test)]
+pub(crate) fn decode_soulseek(path: std::path::PathBuf, shared: Arc<Shared>, ext: &str, seek: Option<f64>) -> Result<(u64, u32, Option<u32>), String> {
+    let s = StreamSource::soulseek(path, shared.clone())?;
+    let mut hint = Hint::new();
+    hint.with_extension(ext);
+    shared.probing.store(true, Ordering::Relaxed);
+    let mss = MediaSourceStream::new(Box::new(s), Default::default());
+    let format = symphonia::default::get_probe().probe(&hint, mss, FormatOptions::default(), MetadataOptions::default());
+    shared.probing.store(false, Ordering::Relaxed);
+    let mut format = format.map_err(|e| e.to_string())?;
+    let track = format.default_track(TrackType::Audio).ok_or("no track")?;
+    let id = track.id;
+    let ap = track.codec_params.as_ref().and_then(|p| p.audio()).ok_or("no audio")?.clone();
+    let mut dec = symphonia::default::get_codecs().make_audio_decoder(&ap, &AudioDecoderOptions::default()).map_err(|e| e.to_string())?;
+    if let Some(secs) = seek {
+        format.seek(SeekMode::Accurate, SeekTo::Time { time: Time::try_from_secs_f64(secs).unwrap(), track_id: Some(id) }).map_err(|e| e.to_string())?;
+        dec.reset();
+    }
+    let mut frames = 0u64;
+    loop {
+        match format.next_packet() {
+            Ok(Some(p)) => frames += dec.decode(&p).map_err(|e| e.to_string())?.frames() as u64,
+            Ok(None) => break,
+            Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok((frames, ap.sample_rate.unwrap_or(0), ap.bits_per_sample))
 }

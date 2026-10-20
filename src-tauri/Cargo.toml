@@ -20,6 +20,8 @@ ringbuf = "0.5.3"
 lofty = "0.25.4"
 walkdir = "2.5.0"
 tauri-plugin-dialog = "2.8.3"
+flate2 = "1"
+md5 = "0.7"
 
 [profile.release]
 opt-level = "s"

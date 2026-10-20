@@ -5,11 +5,16 @@ mod commons;
 mod library;
 mod local;
 mod player;
+mod slsk;
 
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(player::Player::new())
+        .setup(|_| {
+            slsk::boot();
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             player::player_load,
             player::player_toggle,
@@ -26,7 +31,17 @@ fn main() {
             archive::ia_subject,
             commons::commons_search,
             library::library_load,
-            library::library_save
+            library::library_save,
+            slsk::slsk_status,
+            slsk::slsk_config_get,
+            slsk::slsk_config_set,
+            slsk::slsk_search,
+            slsk::slsk_results,
+            slsk::slsk_stream,
+            slsk::slsk_transfer,
+            slsk::slsk_cancel,
+            slsk::slsk_stop_streams,
+            slsk::slsk_save
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Miek");
