@@ -994,6 +994,7 @@ async function pollState() {
     qb.title = `Source ${src} · output ${s.device || 'default device'} at ${(s.outRate / 1000).toFixed(1)} kHz${resampled ? ' (high-quality resampling)' : ' (no resampling)'}${arriving}`;
     qb.classList.remove('hidden');
   } else qb.classList.add('hidden');
+  if (s.cover && cur0 && !cur0.image && s.seq === Q.seq) adoptCover(cur0, convertFileSrc(s.cover));
   if ((s.status === 'ended' || s.status === 'error') && s.seq === Q.seq && S.handledSeq !== s.seq) {
     S.handledSeq = s.seq;
     const cur = current();
@@ -1003,6 +1004,16 @@ async function pollState() {
       if (!(cur && cur.slsk)) setTimeout(() => next(true), 900);
     } else next(true);
   }
+}
+
+// a song without artwork (e.g. from Soulseek) that carries its own picture: show it and remember it
+function adoptCover(t, src) {
+  t.image = src;
+  setArt(src);
+  const lists = [LIB.data.recent, LIB.data.liked, ...LIB.data.playlists.map((p) => p.tracks)];
+  for (const list of lists) for (const x of list) if (x.uri === t.uri && !x.image) x.image = src;
+  libSave();
+  refreshQueue();
 }
 
 // cover art drives the backdrop and the accent colour

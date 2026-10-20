@@ -43,7 +43,7 @@ fn index_path() -> PathBuf {
     let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
     base.join("Miek").join("local.json")
 }
-fn covers_dir() -> PathBuf {
+pub(crate) fn covers_dir() -> PathBuf {
     let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
     base.join("Miek").join("covers")
 }

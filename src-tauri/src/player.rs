@@ -39,6 +39,8 @@ pub struct Info {
     volume: f32,
     error: Option<String>,
     codec: Option<String>,
+    /// picture embedded in the file (saved under the covers folder), for sources without artwork
+    cover: Option<String>,
     sample_rate: u32,
     bit_depth: Option<u32>,
     channels: usize,
@@ -837,6 +839,35 @@ impl MediaSource for StreamSource {
     }
 }
 
+/// The file's own cover picture (front cover if marked), written to the covers folder once per image.
+fn embedded_cover(format: &mut dyn FormatReader) -> Option<String> {
+    use symphonia::core::meta::StandardVisualKey;
+    let mut md = format.metadata();
+    let mut visuals = md.current().map(|r| r.media.visuals.clone()).unwrap_or_default();
+    if let Some(r) = md.skip_to_latest() {
+        visuals.extend(r.media.visuals.iter().cloned());
+    }
+    let v = visuals.iter().find(|v| v.usage == Some(StandardVisualKey::FrontCover)).or(visuals.first())?;
+    let ext = match v.media_type.as_deref().unwrap_or("") {
+        "image/png" => "png",
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ if v.data.starts_with(&[0x89, b'P', b'N', b'G']) => "png",
+        _ if v.data.starts_with(&[0xFF, 0xD8]) => "jpg",
+        _ => return None,
+    };
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&v.data[..], &mut h);
+    let dir = crate::local::covers_dir();
+    let path = dir.join(format!("embedded-{:016x}.{ext}", std::hash::Hasher::finish(&h)));
+    if !path.exists() {
+        std::fs::create_dir_all(&dir).ok()?;
+        std::fs::write(&path, &v.data).ok()?;
+    }
+    Some(path.to_string_lossy().into_owned())
+}
+
 // ---------------------------------------------------------------- engine thread
 
 struct Track {
@@ -999,6 +1030,7 @@ impl Engine {
             i.position = 0.0;
             i.duration = 0.0;
             i.codec = None;
+            i.cover = None;
         });
         if let Err(e) = self.ensure_output() {
             self.set(|i| {
@@ -1069,7 +1101,8 @@ impl Engine {
         if let Some(sh) = probing {
             sh.probing.store(false, Ordering::Relaxed);
         }
-        let format = format.map_err(|e| format!("Unsupported audio: {e}"))?;
+        let mut format = format.map_err(|e| format!("Unsupported audio: {e}"))?;
+        let cover = embedded_cover(&mut *format);
         let track = format.default_track(TrackType::Audio).ok_or("No audio track")?;
         let track_id = track.id;
         let time_base = track.time_base;
@@ -1100,6 +1133,7 @@ impl Engine {
             i.sample_rate = src_rate;
             i.bit_depth = bits;
             i.channels = channels;
+            i.cover = cover;
         });
         Ok(Track { format, decoder, track_id, time_base, src_rate, resampler, pending: vec![], drop_frames: 0, eof: false, seq })
     }
