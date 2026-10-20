@@ -22,8 +22,9 @@ console.log(`${old} → ${v}`);
 edit('src-tauri/tauri.conf.json', (s) => s.replace(`"version": "${old}"`, `"version": "${v}"`));
 json('package.json', (o) => { o.version = v; });
 json('package-lock.json', (o) => { o.version = v; if (o.packages && o.packages['']) o.packages[''].version = v; });
-edit('src-tauri/Cargo.toml', (s) => s.replace(/^(\[package\][^[]*?\nversion = ")[^"]+"/m, `$1${v}"`));
-edit('src-tauri/Cargo.lock', (s) => s.replace(/(\[\[package\]\]\nname = "miek"\nversion = ")[^"]+"/, `$1${v}"`));
+// (\r?\n: git on Windows may check these out with CRLF line endings)
+edit('src-tauri/Cargo.toml', (s) => s.replace(/^(\[package\][^[]*?\r?\nversion = ")[^"]+"/m, `$1${v}"`));
+edit('src-tauri/Cargo.lock', (s) => s.replace(/(\[\[package\]\]\r?\nname = "miek"\r?\nversion = ")[^"]+"/, `$1${v}"`));
 console.log(`
 Next:
   git commit -am "Miek ${v}"
