@@ -57,14 +57,17 @@ def connect_client():
     return socket.create_connection(("127.0.0.1", client["port"]), timeout=10)
 
 # ------------------------------------------------------------------ alice
-def search_response(token):
+ALICE_ITEMS = [(f, len(d), [(1, 30), (4, 48000), (5, 24)]) for f, d in FILES.items()]
+ALICE_ITEMS += [(DENIED, 1234567, [(1, 30), (4, 44100), (5, 16)]), (b"Music\\Alice\\Tones\\cover.jpg", 2048, [])]
+# carol answers first, with lossy files only (FLAC results must still be listed ahead of them)
+CAROL_ITEMS = [(b"Share\\Tones\\Test Tone.m4a", 3000000, [(0, 256), (1, 30)]), (b"Share\\Tones\\Test Tone.mp3", 1200000, [(0, 320), (1, 30), (2, 0)])]
+
+def search_response(token, user="alice", items=ALICE_ITEMS):
     res = b""
-    items = [(f, len(d), [(1, 30), (4, 48000), (5, 24)]) for f, d in FILES.items()]
-    items += [(DENIED, 1234567, [(1, 30), (4, 44100), (5, 16)]), (b"Music\\Alice\\Tones\\cover.jpg", 2048, [])]
     for f, size, attrs in items:
         res += b"\x01" + s(f) + struct.pack("<Q", size) + s(b"") + struct.pack("<I", len(attrs))
         res += b"".join(struct.pack("<II", c, v) for c, v in attrs)
-    body = s("alice") + struct.pack("<I", token) + struct.pack("<I", len(items)) + res
+    body = s(user) + struct.pack("<I", token) + struct.pack("<I", len(items)) + res
     body += b"\x01" + struct.pack("<III", 123456, 0, 0) + struct.pack("<I", 0)
     return msg(9, zlib.compress(body))
 
@@ -166,6 +169,10 @@ def alice_pierce_p(ctoken):
     threading.Thread(target=lambda: [handle_peer(c, f, [700]) for f in frames(c)], daemon=True).start()
 
 def alice_search(token):
+    early = connect_client()
+    early.sendall(init(1, s("carol") + s("P") + struct.pack("<I", 0)))
+    early.sendall(search_response(token, "carol", CAROL_ITEMS))
+    time.sleep(1.0)
     c = connect_client()
     c.sendall(init(1, s("alice") + s("P") + struct.pack("<I", 0)))
     c.sendall(search_response(token))

@@ -251,6 +251,7 @@ function slskNote(st) {
     : `Soulseek isn’t connected: ${st.error || 'unknown error'}`;
   return h('div', { class: 'slsk-note' }, h('span', { text: msg }), h('button', { class: 'btn', onclick: () => go('settings') }, icon('settings', 15), 'Soulseek settings'));
 }
+const FORMAT_ORDER = (ext) => (ext === 'flac' ? 0 : ext === 'mp3' ? 1 : 2);
 // live results: filled in as peers answer, until the search runs out or the user leaves the page
 function soulseekResults(term) {
   const box = h('div', {}, h('p', { class: 'fine', text: 'Searching Soulseek…' }));
@@ -277,8 +278,8 @@ function soulseekResults(term) {
     let done = false;
     const more = h('button', { class: 'btn hidden', text: 'Show more', onclick: () => { shown += 200; render(); } });
     const render = () => {
-      for (let i = rows.childElementCount; i < Math.min(hits.length, shown); i++) rows.append(slskRow(hits[i]));
-      count.textContent = hits.length ? `${plural(hits.length, 'file')} from ${plural(users.size, 'user')}, in the order they answered${done ? '' : ' · still searching…'}` : done ? 'No one answered with a playable file.' : 'Waiting for answers…';
+      rows.replaceChildren(...hits.slice(0, shown).map((t) => (t.row ||= slskRow(t))));
+      count.textContent = hits.length ? `${plural(hits.length, 'file')} from ${plural(users.size, 'user')} · FLAC first, then MP3, each in the order they answered${done ? '' : ' · still searching…'}` : done ? 'No one answered with a playable file.' : 'Waiting for answers…';
       more.classList.toggle('hidden', hits.length <= shown);
       markPlaying();
     };
@@ -286,12 +287,20 @@ function soulseekResults(term) {
     render();
     while (live() && !done) {
       await sleep(700);
+      const had = hits.length;
       try {
         const r = await invoke('slsk_results', { token, from: hits.length });
-        for (const x of r.hits) { hits.push({ ...slskTrack(x), hit: x }); users.add(x.user); }
+        for (const x of r.hits) {
+          // FLAC, then MP3, then the rest; arrival order within each (insert after the last of the same group)
+          const g = FORMAT_ORDER(x.ext);
+          let at = hits.length;
+          while (at > 0 && FORMAT_ORDER(hits[at - 1].hit.ext) > g) at--;
+          hits.splice(at, 0, { ...slskTrack(x), hit: x });
+          users.add(x.user);
+        }
         done = r.done;
       } catch { done = true; }
-      if (live()) render();
+      if (live() && (hits.length !== had || done)) render();
     }
   })().catch((e) => box.replaceChildren(h('p', { class: 'fine', text: String(e) })));
   return box;
