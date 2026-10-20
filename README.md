@@ -28,7 +28,10 @@ file / network stream → symphonia (demux + decode) → 32-bit float
 
 - Decoding with [Symphonia](https://github.com/pdeljanov/Symphonia) (FLAC, ALAC, WAV/AIFF, MP3, AAC, Vorbis…), gapless-aware decoders.
 - No resampling when the source matches the output device; otherwise a 256-tap Blackman-Harris sinc filter via [rubato](https://github.com/HEnquist/rubato).
-- Network streams download over one connection into a local cache while playing: seeks inside the downloaded part are instant, replays start immediately (cache capped at 2 GB in `%LOCALAPPDATA%\Miek\stream-cache`).
+- Network streams download into a local cache while playing: seeks inside the downloaded part are instant, replays start immediately (cache capped at 2 GB in `%LOCALAPPDATA%\Miek\stream-cache`).
+- Internet Archive files are fetched as chunks over 4 connections at once, nearest the playhead first (its servers are slow per connection), and playback reads a chunk while it is still arriving. Other servers get one connection (Wikimedia rate-limits parallel requests).
+- Connections are kept alive between songs, the Archive's redirect to its storage server is remembered per album, and the start of the next song in the queue is preloaded, so pressing Next or autoplay starts it in a fraction of a second.
+- Streams skip the decoder's end-of-file tag scan while opening (it forced an extra download before the first note); metadata comes from the source instead.
 - Follows the default output device; reopens it if headphones are unplugged.
 
 ## Build

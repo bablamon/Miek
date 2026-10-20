@@ -304,7 +304,13 @@ async function loadIndex(i, autoplay = true) {
   try {
     Q.seq = await invoke('player_load', { src: t.src, autoplay });
   } catch (e) { fail(e); }
+  prefetchNext();
   topUpAutoplay();
+}
+// start downloading the beginning of the next track now, so it starts without waiting
+function prefetchNext() {
+  const t = Q.list[Q.i + 1];
+  if (t && t.src && t.src.kind === 'url') invoke('player_prefetch', { src: t.src }).catch(() => {});
 }
 function playList(tracks, i = 0) {
   if (!tracks.length) return;
@@ -330,6 +336,7 @@ function queueAdd(tracks, next = false) {
   }
   items.forEach((t) => Q.radioSeen.add(t.uri));
   refreshQueue();
+  prefetchNext();
 }
 
 async function next(auto = false) {
@@ -866,6 +873,7 @@ $('shuffle').onclick = () => {
   Q.shuffle = !Q.shuffle;
   if (Q.shuffle && Q.list.length) Q.list = [...Q.list.slice(0, Q.i + 1), ...shuffleArr(Q.list.slice(Q.i + 1))];
   renderShuffle();
+  prefetchNext();
   refreshQueue();
 };
 $('repeat').onclick = () => { Q.repeat = (Q.repeat + 1) % 3; renderRepeat(); };

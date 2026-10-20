@@ -16,6 +16,7 @@ fn main() {
             player::player_seek,
             player::player_volume,
             player::player_state,
+            player::player_prefetch,
             local::local_get,
             local::local_set_folders,
             local::local_scan,

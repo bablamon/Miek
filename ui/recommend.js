@@ -173,6 +173,7 @@ function topUpAutoplay() {
       Q.list.push(...items);
       items.forEach((t) => Q.radioSeen.add(t.uri));
       refreshQueue();
+      prefetchNext();
     })
     .catch(() => {})
     .finally(() => { REC.busy = null; });

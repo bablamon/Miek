@@ -128,6 +128,13 @@ pub fn player_volume(p: tauri::State<'_, Player>, v: f32) {
     // perceptual curve lives in the callback; store the slider value
     p.cb.volume.store(v.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
 }
+/// Fetch the start of the next track in the background so it starts without waiting.
+#[tauri::command]
+pub fn player_prefetch(src: Src) {
+    if src.kind == "url" {
+        prefetch(src.value);
+    }
+}
 #[tauri::command]
 pub fn player_state(p: tauri::State<'_, Player>) -> Info {
     p.state()
@@ -210,17 +217,54 @@ fn build<T: cpal::SizedSample + cpal::FromSample<f32>>(
 
 // ---------------------------------------------------------------- network source
 //
-// A background thread downloads the file over one connection into a local cache file;
-// playback reads from that file as it grows (seeks inside the downloaded part are instant).
-// Reads far ahead of the download (a long seek) are served by small ranged requests.
+// Files stream into a local cache file while they play. Internet Archive files are fetched as
+// chunks over several connections at once, nearest the playhead first: its servers are slow per
+// connection but scale with parallel ones. Playback reads a chunk while it is still arriving; a
+// seek moves the download focus. Other servers (Wikimedia rate-limits parallel requests) get one
+// connection, front to back.
+// One shared HTTP client keeps connections alive between chunks and tracks, the Archive's
+// redirect to its storage server is remembered per item, and the next track in the queue can be
+// prefetched (its first chunks) so it starts without waiting.
 // Finished downloads stay cached, so replays start immediately and work offline.
 
 struct Shared {
-    downloaded: AtomicU64,
     len: AtomicU64,
     done: AtomicBool,
     cancel: AtomicBool,
     failed: Mutex<Option<String>>,
+    /// only fetch below this byte offset (a prefetch stops early); u64::MAX = everything
+    limit: AtomicU64,
+    /// sequential mode: bytes downloaded from the start
+    downloaded: AtomicU64,
+    /// chunked mode: claim state per chunk (0 to do, 1 in flight, 2 done) and bytes landed per chunk
+    chunks: Option<Mutex<Vec<u8>>>,
+    progress: Vec<AtomicU64>,
+    /// chunk that playback needs next
+    focus: AtomicU64,
+    /// while the decoder probes the stream: report it unseekable, so the probe doesn't jump to the
+    /// end of the file for trailing tags (that costs a whole extra download before the first note)
+    probing: AtomicBool,
+}
+
+impl Shared {
+    fn new(len: u64, chunked: bool) -> Self {
+        let n = if chunked { chunk_count(len) } else { 0 };
+        Shared {
+            len: AtomicU64::new(len),
+            done: AtomicBool::new(false),
+            cancel: AtomicBool::new(false),
+            failed: Mutex::new(None),
+            limit: AtomicU64::new(u64::MAX),
+            downloaded: AtomicU64::new(0),
+            chunks: chunked.then(|| Mutex::new(vec![0u8; n])),
+            progress: (0..n).map(|_| AtomicU64::new(0)).collect(),
+            focus: AtomicU64::new(0),
+            probing: AtomicBool::new(false),
+        }
+    }
+    fn fail(&self, e: &str) {
+        self.failed.lock().unwrap().get_or_insert_with(|| e.to_string());
+    }
 }
 
 struct StreamSource {
@@ -233,12 +277,34 @@ struct StreamSource {
     side: Vec<u8>,
 }
 
-const AHEAD_WAIT: u64 = 3 * 1024 * 1024; // within this distance, wait for the download instead of a ranged request
-const SIDE_CHUNK: u64 = 256 * 1024;
+const AHEAD_WAIT: u64 = 3 * 1024 * 1024; // sequential mode: within this distance, wait for the download instead of a ranged request
+const SIDE_CHUNK: u64 = 512 * 1024;
+const FIRST_CHUNK: u64 = 256 * 1024; // small first request, so playback can start sooner
+const CHUNK: u64 = 1024 * 1024;
+const WORKERS: usize = 4;
+const PREFETCH_BYTES: u64 = FIRST_CHUNK + CHUNK;
+
+fn chunk_start(i: usize) -> u64 {
+    if i == 0 { 0 } else { FIRST_CHUNK + (i as u64 - 1) * CHUNK }
+}
+fn chunk_of(pos: u64) -> usize {
+    if pos < FIRST_CHUNK { 0 } else { 1 + ((pos - FIRST_CHUNK) / CHUNK) as usize }
+}
+fn chunk_count(len: u64) -> usize {
+    if len == 0 { 0 } else { chunk_of(len - 1) + 1 }
+}
+fn chunk_end(i: usize, len: u64) -> u64 {
+    chunk_start(i + 1).min(len) // exclusive
+}
 
 fn cache_dir() -> std::path::PathBuf {
     let base = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
     base.join("Miek").join("stream-cache")
+}
+fn cache_path(url: &str) -> std::path::PathBuf {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(url, &mut h);
+    cache_dir().join(format!("{:016x}", std::hash::Hasher::finish(&h)))
 }
 
 /// Keep the stream cache under ~2 GB by deleting the least recently used files.
@@ -260,30 +326,120 @@ fn trim_cache() {
     }
 }
 
-fn http_client() -> Result<reqwest::blocking::Client, String> {
-    reqwest::blocking::Client::builder()
-        .user_agent(concat!("Miek/", env!("CARGO_PKG_VERSION"), " (open-source music player)"))
-        .connect_timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|e| e.to_string())
+/// One client for the whole app: its connection pool keeps TLS connections alive between requests.
+fn http_client() -> reqwest::blocking::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::blocking::Client::builder()
+                .user_agent(concat!("Miek/", env!("CARGO_PKG_VERSION"), " (open-source music player)"))
+                .connect_timeout(Duration::from_secs(15))
+                .pool_idle_timeout(Duration::from_secs(90))
+                .tcp_nodelay(true)
+                .build()
+                .expect("http client")
+        })
+        .clone()
+}
+
+// archive.org/download/<item>/… redirects to the storage server holding the item; remember it per item
+static REDIRECTS: Mutex<Option<std::collections::HashMap<String, String>>> = Mutex::new(None);
+fn archive_key(url: &str) -> Option<(&str, &str)> {
+    let rest = url.strip_prefix("https://archive.org/download/")?;
+    let slash = rest.find('/')?;
+    let cut = "https://archive.org/download/".len() + slash + 1;
+    Some((&url[..cut], &url[cut..]))
+}
+fn resolve(url: &str) -> Option<String> {
+    let (key, rest) = archive_key(url)?;
+    REDIRECTS.lock().unwrap().as_ref()?.get(key).map(|base| format!("{base}{rest}"))
+}
+fn remember(url: &str, final_url: &str) {
+    if let Some((key, rest)) = archive_key(url) {
+        if final_url != url && final_url.ends_with(rest) {
+            let base = final_url[..final_url.len() - rest.len()].to_string();
+            REDIRECTS.lock().unwrap().get_or_insert_with(Default::default).insert(key.to_string(), base);
+        }
+    }
+}
+fn forget(url: &str) {
+    if let (Some((key, _)), Some(m)) = (archive_key(url), REDIRECTS.lock().unwrap().as_mut()) {
+        m.remove(key);
+    }
+}
+
+/// The URL playing now: a prefetch must never rewrite the cache file being played.
+static PLAYING: Mutex<Option<String>> = Mutex::new(None);
+
+enum Prefetch {
+    Pending,
+    Ready(StreamSource),
+    Failed,
+}
+static PREFETCH: Mutex<Option<(String, Prefetch)>> = Mutex::new(None);
+
+/// Start fetching the beginning of `url` in the background (replaces any earlier prefetch).
+pub fn prefetch(url: String) {
+    if !url.starts_with("https://") || cache_path(&url).with_extension("done").exists() {
+        return;
+    }
+    {
+        // checked under the slot lock, which open() also holds while it marks what's playing
+        let mut slot = PREFETCH.lock().unwrap();
+        if PLAYING.lock().unwrap().as_deref() == Some(url.as_str()) || matches!(slot.as_ref(), Some((u, _)) if *u == url) {
+            return;
+        }
+        *slot = Some((url.clone(), Prefetch::Pending)); // dropping an older one cancels its download
+    }
+    let _ = std::thread::Builder::new().name("miek-prefetch".into()).spawn(move || {
+        let res = StreamSource::start(&url, PREFETCH_BYTES);
+        let mut slot = PREFETCH.lock().unwrap();
+        if let Some((u, state @ Prefetch::Pending)) = slot.as_mut() {
+            if *u == url {
+                *state = match res {
+                    Ok(s) => Prefetch::Ready(s),
+                    Err(_) => Prefetch::Failed,
+                };
+            }
+        }
+    });
 }
 
 impl StreamSource {
+    /// Open for playback: take over a matching prefetch, or start fresh.
     fn open(url: &str) -> Result<Self, String> {
+        {
+            let _slot = PREFETCH.lock().unwrap();
+            *PLAYING.lock().unwrap() = Some(url.to_string());
+        }
+        let waited = std::time::Instant::now();
+        loop {
+            let mut slot = PREFETCH.lock().unwrap();
+            match slot.as_ref() {
+                Some((u, Prefetch::Pending)) if u == url && waited.elapsed() < Duration::from_secs(20) => {
+                    drop(slot);
+                    std::thread::sleep(Duration::from_millis(15));
+                    continue;
+                }
+                Some((u, _)) if u == url => {
+                    if let Some((_, Prefetch::Ready(s))) = slot.take() {
+                        s.shared.limit.store(u64::MAX, Ordering::SeqCst);
+                        return Ok(s);
+                    }
+                    break; // failed or timed out: open fresh below
+                }
+                _ => break,
+            }
+        }
+        StreamSource::start(url, u64::MAX)
+    }
+
+    fn start(url: &str, limit: u64) -> Result<Self, String> {
         let dir = cache_dir();
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        std::hash::Hash::hash(url, &mut h);
-        let path = dir.join(format!("{:016x}", std::hash::Hasher::finish(&h)));
+        let path = cache_path(url);
         let done_marker = path.with_extension("done");
-        let client = http_client()?;
-        let shared = Arc::new(Shared {
-            downloaded: AtomicU64::new(0),
-            len: AtomicU64::new(0),
-            done: AtomicBool::new(false),
-            cancel: AtomicBool::new(false),
-            failed: Mutex::new(None),
-        });
+        let client = http_client();
 
         // fully cached already: play from disk
         if done_marker.exists() {
@@ -292,78 +448,91 @@ impl StreamSource {
                 if len > 0 {
                     // touch it so cache trimming treats it as recently used
                     let _ = std::fs::File::options().append(true).open(&path).and_then(|f| f.set_modified(std::time::SystemTime::now()));
+                    let shared = Shared::new(len, false);
                     shared.downloaded.store(len, Ordering::SeqCst);
-                    shared.len.store(len, Ordering::SeqCst);
                     shared.done.store(true, Ordering::SeqCst);
-                    return Ok(StreamSource { file: f, shared, client, url: url.to_string(), pos: 0, side_start: 0, side: vec![] });
+                    return Ok(StreamSource { file: f, shared: Arc::new(shared), client, url: url.to_string(), pos: 0, side_start: 0, side: vec![] });
                 }
             }
         }
         trim_cache();
         let _ = std::fs::remove_file(&done_marker);
-        let resp = client.get(url).send().and_then(|r| r.error_for_status()).map_err(|e| format!("Network error: {e}"))?;
+
+        // Parallel chunks only for the Internet Archive: its servers are slow per connection and
+        // allow parallel ranges. Others (Wikimedia rate-limits parallel requests) get one connection.
+        // First request: a small range; 206 = the server does ranges (chunked mode).
+        let parallel = archive_key(url).is_some();
+        let first = |u: &str| {
+            let req = client.get(u);
+            let req = if parallel { req.header("Range", format!("bytes=0-{}", FIRST_CHUNK - 1)) } else { req };
+            req.send().and_then(|r| r.error_for_status())
+        };
+        let resp = match resolve(url) {
+            Some(direct) => first(&direct).or_else(|_| {
+                forget(url); // the item moved: ask archive.org again
+                first(url)
+            }),
+            None => first(url),
+        }
+        .map_err(|e| format!("Network error: {e}"))?;
         let final_url = resp.url().to_string();
-        shared.len.store(resp.content_length().unwrap_or(0), Ordering::SeqCst);
-        let mut writer = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+        remember(url, &final_url);
+        let total = (resp.status() == reqwest::StatusCode::PARTIAL_CONTENT)
+            .then(|| resp.headers().get(reqwest::header::CONTENT_RANGE)?.to_str().ok()?.rsplit('/').next()?.parse::<u64>().ok())
+            .flatten();
+
+        let resp = if total.is_none() && resp.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+            client.get(&final_url).send().and_then(|r| r.error_for_status()).map_err(|e| format!("Network error: {e}"))?
+        } else {
+            resp
+        };
+        let writer = std::fs::File::create(&path).map_err(|e| e.to_string())?;
         let reader = std::fs::File::open(&path).map_err(|e| e.to_string())?;
-        let sh = shared.clone();
-        let c2 = client.clone();
-        let u2 = final_url.clone();
-        std::thread::Builder::new()
-            .name("miek-download".into())
-            .spawn(move || {
-                use std::io::Write;
-                let mut resp = resp;
-                let mut buf = vec![0u8; 64 * 1024];
-                let mut retries = 0u64;
-                loop {
-                    if sh.cancel.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    match resp.read(&mut buf) {
-                        Ok(0) => {
-                            let got = sh.downloaded.load(Ordering::SeqCst);
-                            let len = sh.len.load(Ordering::SeqCst);
-                            if len == 0 || got >= len {
-                                let _ = writer.flush();
-                                sh.len.store(got, Ordering::SeqCst);
-                                sh.done.store(true, Ordering::SeqCst);
-                                let _ = std::fs::write(&done_marker, b"");
-                                return;
-                            }
-                            // connection closed early: resume below
-                        }
-                        Ok(n) => {
-                            if writer.write_all(&buf[..n]).is_err() {
-                                *sh.failed.lock().unwrap() = Some("Couldn't write the stream cache".into());
-                                return;
-                            }
-                            sh.downloaded.fetch_add(n as u64, Ordering::SeqCst);
-                            retries = 0;
-                            continue;
-                        }
-                        Err(_) => {}
-                    }
-                    retries += 1;
-                    if retries > 4 {
-                        *sh.failed.lock().unwrap() = Some("The download kept failing".into());
-                        return;
-                    }
-                    std::thread::sleep(Duration::from_millis(500 * retries));
-                    let from = sh.downloaded.load(Ordering::SeqCst);
-                    if let Ok(r) = c2.get(&u2).header("Range", format!("bytes={from}-")).send() {
-                        if r.status() == reqwest::StatusCode::PARTIAL_CONTENT {
-                            resp = r;
-                        }
-                    }
-                }
-            })
-            .map_err(|e| e.to_string())?;
+        let shared = Arc::new(match total {
+            Some(len) => Shared::new(len, true),
+            None => Shared::new(if resp.status() == reqwest::StatusCode::OK { resp.content_length().unwrap_or(0) } else { 0 }, false),
+        });
+        shared.limit.store(limit, Ordering::SeqCst);
+
+        if total.is_some() {
+            drop(writer);
+            // worker 0 continues the first response as chunk 0
+            shared.chunks.as_ref().unwrap().lock().unwrap()[0] = 1;
+            let mut first_resp = Some((0usize, resp));
+            for _ in 0..WORKERS {
+                let (sh, c, u, p, m) = (shared.clone(), client.clone(), final_url.clone(), path.clone(), done_marker.clone());
+                let first = first_resp.take();
+                std::thread::Builder::new()
+                    .name("miek-chunk".into())
+                    .spawn(move || chunk_worker(sh, c, u, p, m, first))
+                    .map_err(|e| e.to_string())?;
+            }
+        } else {
+            // the server ignored the range: this response is the whole file, read front to back
+            let (sh, c, u) = (shared.clone(), client.clone(), final_url.clone());
+            std::thread::Builder::new()
+                .name("miek-download".into())
+                .spawn(move || sequential_download(sh, c, u, resp, writer, done_marker))
+                .map_err(|e| e.to_string())?;
+        }
         Ok(StreamSource { file: reader, shared, client, url: final_url, pos: 0, side_start: 0, side: vec![] })
     }
 
     fn len(&self) -> u64 {
         self.shared.len.load(Ordering::SeqCst)
+    }
+
+    /// Bytes readable right now from `pos` without waiting.
+    fn available(&self, pos: u64) -> u64 {
+        let sh = &self.shared;
+        if sh.chunks.is_some() {
+            let i = chunk_of(pos);
+            let Some(got) = sh.progress.get(i) else { return 0 };
+            let landed = chunk_start(i) + got.load(Ordering::SeqCst);
+            landed.saturating_sub(pos)
+        } else {
+            sh.downloaded.load(Ordering::SeqCst).saturating_sub(pos)
+        }
     }
 
     /// Ranged request for data far ahead of the download (after a long seek).
@@ -396,6 +565,170 @@ impl StreamSource {
     }
 }
 
+/// Downloads chunks (nearest the playhead first) until every chunk below the limit is done.
+/// Chunk data is written as it arrives, so playback can read a chunk before it completes.
+fn chunk_worker(
+    sh: Arc<Shared>,
+    client: reqwest::blocking::Client,
+    url: String,
+    path: std::path::PathBuf,
+    done_marker: std::path::PathBuf,
+    mut first: Option<(usize, reqwest::blocking::Response)>,
+) {
+    use std::io::Write;
+    let Ok(mut file) = std::fs::OpenOptions::new().write(true).open(&path) else {
+        return sh.fail("Couldn't write the stream cache");
+    };
+    let len = sh.len.load(Ordering::SeqCst);
+    let chunks = sh.chunks.as_ref().unwrap();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        if sh.cancel.load(Ordering::Relaxed) || sh.failed.lock().unwrap().is_some() {
+            return;
+        }
+        // claim: the first chunk to do from the playhead on, then wrap around
+        let mut pre = None;
+        let claim = if let Some((i, r)) = first.take() {
+            pre = Some(r);
+            Some(i)
+        } else {
+            let mut st = chunks.lock().unwrap();
+            if st.iter().all(|&s| s == 2) {
+                if !sh.done.swap(true, Ordering::SeqCst) {
+                    let _ = std::fs::write(&done_marker, b"");
+                }
+                return;
+            }
+            let n = st.len();
+            let focus = (sh.focus.load(Ordering::SeqCst) as usize).min(n);
+            let limit = sh.limit.load(Ordering::SeqCst);
+            let pick = (focus..n).chain(0..focus).find(|&i| st[i] == 0 && chunk_start(i) < limit);
+            if let Some(i) = pick {
+                st[i] = 1;
+            }
+            pick
+        };
+        let Some(i) = claim else {
+            std::thread::sleep(Duration::from_millis(30)); // others are busy, or a prefetch is at its limit
+            continue;
+        };
+        let (start, end) = (chunk_start(i), chunk_end(i, len));
+        let mut ok = false;
+        for attempt in 0..5u64 {
+            // resume where this chunk left off
+            let from = start + sh.progress[i].load(Ordering::SeqCst);
+            if from >= end {
+                ok = true;
+                break;
+            }
+            if attempt > 0 {
+                std::thread::sleep(Duration::from_millis(400 * attempt));
+            }
+            let resp = match pre.take() {
+                Some(r) => Ok(r),
+                None => client.get(&url).header("Range", format!("bytes={from}-{}", end - 1)).send().and_then(|r| r.error_for_status()),
+            };
+            let Ok(mut resp) = resp else { continue };
+            if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+                continue;
+            }
+            if file.seek(SeekFrom::Start(from)).is_err() {
+                break;
+            }
+            let mut at = from;
+            loop {
+                if sh.cancel.load(Ordering::Relaxed) {
+                    return;
+                }
+                let want = (end - at).min(buf.len() as u64) as usize;
+                match resp.read(&mut buf[..want]) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if file.write_all(&buf[..n]).is_err() {
+                            return sh.fail("Couldn't write the stream cache");
+                        }
+                        at += n as u64;
+                        sh.progress[i].store(at - start, Ordering::SeqCst);
+                        if at >= end {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            if at >= end {
+                ok = true;
+                break;
+            }
+        }
+        let mut st = chunks.lock().unwrap();
+        if ok {
+            st[i] = 2;
+        } else {
+            st[i] = 0;
+            drop(st);
+            return sh.fail("The download kept failing");
+        }
+    }
+}
+
+/// One connection, front to back (servers without byte ranges).
+fn sequential_download(
+    sh: Arc<Shared>,
+    client: reqwest::blocking::Client,
+    url: String,
+    mut resp: reqwest::blocking::Response,
+    mut writer: std::fs::File,
+    done_marker: std::path::PathBuf,
+) {
+    use std::io::Write;
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut retries = 0u64;
+    loop {
+        if sh.cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        if sh.downloaded.load(Ordering::SeqCst) >= sh.limit.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(30)); // prefetch: wait until it's played
+            continue;
+        }
+        match resp.read(&mut buf) {
+            Ok(0) => {
+                let got = sh.downloaded.load(Ordering::SeqCst);
+                let len = sh.len.load(Ordering::SeqCst);
+                if len == 0 || got >= len {
+                    let _ = writer.flush();
+                    sh.len.store(got, Ordering::SeqCst);
+                    sh.done.store(true, Ordering::SeqCst);
+                    let _ = std::fs::write(&done_marker, b"");
+                    return;
+                }
+                // connection closed early: resume below
+            }
+            Ok(n) => {
+                if writer.write_all(&buf[..n]).is_err() {
+                    return sh.fail("Couldn't write the stream cache");
+                }
+                sh.downloaded.fetch_add(n as u64, Ordering::SeqCst);
+                retries = 0;
+                continue;
+            }
+            Err(_) => {}
+        }
+        retries += 1;
+        if retries > 4 {
+            return sh.fail("The download kept failing");
+        }
+        std::thread::sleep(Duration::from_millis(500 * retries));
+        let from = sh.downloaded.load(Ordering::SeqCst);
+        if let Ok(r) = client.get(&url).header("Range", format!("bytes={from}-")).send() {
+            if r.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+                resp = r;
+            }
+        }
+    }
+}
+
 impl Drop for StreamSource {
     fn drop(&mut self) {
         self.shared.cancel.store(true, Ordering::Relaxed);
@@ -405,32 +738,46 @@ impl Drop for StreamSource {
 impl Read for StreamSource {
     fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
         let waited = std::time::Instant::now();
+        let chunked = self.shared.chunks.is_some();
         loop {
             let len = self.len();
             if len > 0 && self.pos >= len {
                 return Ok(0);
             }
-            let have = self.shared.downloaded.load(Ordering::SeqCst);
-            if self.pos < have {
-                let n = (out.len() as u64).min(have - self.pos) as usize;
+            // data fetched directly after a long seek
+            if self.pos >= self.side_start && self.pos < self.side_start + self.side.len() as u64 {
+                return self.side_read(out);
+            }
+            let have = self.available(self.pos);
+            if have > 0 {
+                let n = (out.len() as u64).min(have) as usize;
                 self.file.seek(SeekFrom::Start(self.pos))?;
                 let n = self.file.read(&mut out[..n])?;
                 self.pos += n as u64;
                 return Ok(n);
             }
-            if self.shared.done.load(Ordering::SeqCst) {
+            if chunked {
+                // pull the download towards the playhead
+                let i = chunk_of(self.pos);
+                self.shared.focus.store(i as u64, Ordering::SeqCst);
+                // after a seek into a chunk nobody is fetching yet, read a small piece directly
+                let unclaimed = self.shared.chunks.as_ref().unwrap().lock().unwrap().get(i) == Some(&0);
+                if unclaimed && waited.elapsed() > Duration::from_millis(60) {
+                    return self.side_read(out);
+                }
+            } else if self.shared.done.load(Ordering::SeqCst) {
                 return Ok(0);
             }
             if let Some(e) = self.shared.failed.lock().unwrap().clone() {
                 return Err(std::io::Error::other(e));
             }
-            if self.pos >= have + AHEAD_WAIT {
+            if !chunked && self.pos >= self.shared.downloaded.load(Ordering::SeqCst) + AHEAD_WAIT {
                 return self.side_read(out);
             }
             if waited.elapsed() > Duration::from_secs(30) {
                 return Err(std::io::Error::other("Stream stalled"));
             }
-            std::thread::sleep(Duration::from_millis(15));
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 }
@@ -446,13 +793,16 @@ impl Seek for StreamSource {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek before start"));
         }
         self.pos = p as u64;
+        if self.shared.chunks.is_some() {
+            self.shared.focus.store(chunk_of(self.pos) as u64, Ordering::SeqCst);
+        }
         Ok(self.pos)
     }
 }
 
 impl MediaSource for StreamSource {
     fn is_seekable(&self) -> bool {
-        self.len() > 0
+        self.len() > 0 && !self.shared.probing.load(Ordering::Relaxed)
     }
     fn byte_len(&self) -> Option<u64> {
         let l = self.len();
@@ -647,6 +997,7 @@ impl Engine {
 
     fn open(&mut self, src: &Src, seq: u64) -> Result<Track, String> {
         let mut hint = Hint::new();
+        let mut probing: Option<Arc<Shared>> = None;
         let source: Box<dyn MediaSource> = match src.kind.as_str() {
             "file" => {
                 let p = std::path::Path::new(&src.value);
@@ -662,14 +1013,23 @@ impl Engine {
                 if let Some(ext) = src.value.rsplit('.').next().filter(|e| e.len() <= 5) {
                     hint.with_extension(ext);
                 }
-                Box::new(StreamSource::open(&src.value)?)
+                let s = StreamSource::open(&src.value)?;
+                // FLAC/Ogg readers re-check seekability on every seek, so it can be hidden while probing
+                let ext = src.value.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+                if matches!(ext.as_str(), "flac" | "ogg" | "oga" | "opus") {
+                    s.shared.probing.store(true, Ordering::Relaxed);
+                    probing = Some(s.shared.clone());
+                }
+                Box::new(s)
             }
             _ => return Err("unknown source".into()),
         };
         let mss = MediaSourceStream::new(source, Default::default());
-        let format = symphonia::default::get_probe()
-            .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
-            .map_err(|e| format!("Unsupported audio: {e}"))?;
+        let format = symphonia::default::get_probe().probe(&hint, mss, FormatOptions::default(), MetadataOptions::default());
+        if let Some(sh) = probing {
+            sh.probing.store(false, Ordering::Relaxed);
+        }
+        let format = format.map_err(|e| format!("Unsupported audio: {e}"))?;
         let track = format.default_track(TrackType::Audio).ok_or("No audio track")?;
         let track_id = track.id;
         let time_base = track.time_base;
