@@ -6,13 +6,17 @@ mod library;
 mod local;
 mod player;
 mod slsk;
+mod update;
 
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(player::Player::new())
-        .setup(|_| {
+        .setup(|app| {
             slsk::boot();
+            if update::configured(app.handle()) {
+                app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -41,7 +45,11 @@ fn main() {
             slsk::slsk_transfer,
             slsk::slsk_cancel,
             slsk::slsk_stop_streams,
-            slsk::slsk_save
+            slsk::slsk_save,
+            update::app_version,
+            update::update_check,
+            update::update_install,
+            update::update_progress
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Miek");

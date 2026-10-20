@@ -50,6 +50,23 @@ GitHub Actions (`.github/workflows/ci.yml`) builds the app and runs the tests on
 
 `npm run dev` runs it with live reload of the UI.
 
+## Releasing an update
+
+Installed copies of Miek check `https://github.com/bablamon/Miek/releases/latest/download/latest.json` a few seconds after they start, and offer a newer version in a pop-up (Settings → Updates checks by hand). Installing downloads the new installer, checks its signature against the public key built into Miek (anything not signed with the release key is refused), installs it and restarts Miek. Likes, playlists and settings live in `%APPDATA%\Miek` and stay.
+
+One-time setup: a signing key pair. The public key goes in `src-tauri/tauri.conf.json` under `plugins.updater.pubkey`; the private key and its password go in the repository's Actions secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Without the public key, a build has no updater ("Updates aren't set up in this build").
+
+Each release:
+
+```
+node scripts/bump-version.mjs 0.4.0
+git commit -am "Miek 0.4.0"
+git tag -a v0.4.0 -m "What's new: ..."
+git push origin main v0.4.0
+```
+
+The tag starts `.github/workflows/release.yml`: it builds the installer, signs it, and publishes the GitHub release with `latest.json`. The tag message becomes the release notes in the pop-up.
+
 ## Project layout
 
 | Path | What |

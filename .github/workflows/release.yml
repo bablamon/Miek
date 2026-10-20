@@ -1,0 +1,70 @@
+name: Release
+
+# Push a version tag (git tag -a v0.4.0 -m "what's new" && git push origin v0.4.0) to build the
+# installer, sign it with the release key, and publish a GitHub release with latest.json, which
+# running copies of Miek check on start.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the version, the public key and the secrets
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          v=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match version $v. Run: node scripts/bump-version.mjs ${GITHUB_REF_NAME#v}, commit, then tag."
+            exit 1
+          fi
+          node -e "if (!require('./src-tauri/tauri.conf.json').plugins.updater.pubkey.trim()) process.exit(1)" \
+            || { echo "::error::plugins.updater.pubkey is empty in src-tauri/tauri.conf.json"; exit 1; }
+          [ -n "$TAURI_SIGNING_PRIVATE_KEY" ] || { echo "::error::Repository secret TAURI_SIGNING_PRIVATE_KEY is missing"; exit 1; }
+          [ -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ] || { echo "::error::Repository secret TAURI_SIGNING_PRIVATE_KEY_PASSWORD is missing"; exit 1; }
+
+      - name: Release notes from the tag message
+        id: notes
+        run: |
+          git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          notes=$(git tag -l --format='%(contents)' "$GITHUB_REF_NAME")
+          [ -n "$notes" ] || notes="Miek $GITHUB_REF_NAME"
+          { echo 'text<<END_OF_NOTES'; echo "$notes"; echo 'END_OF_NOTES'; } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Miek ${{ github.ref_name }}
+          releaseBody: ${{ steps.notes.outputs.text }}
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
+          args: --config src-tauri/tauri.release.conf.json

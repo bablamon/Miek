@@ -637,8 +637,9 @@ const VIEWS = {
       h('div', { class: 'setting' }, h('div', {}, h('div', { class: 'label', text: 'Intro beat' }), h('div', { class: 'fine', text: 'Play the drum groove with the opening animation.' })), soundBtn),
       h('div', { class: 'setting' }, h('div', {}, h('div', { class: 'label', text: 'Replay intro' })), h('button', { class: 'btn', onclick: () => playIntro() }, 'Play'))));
 
+    out.append(section('Updates'), updateSettings());
     out.append(section('About'), h('div', { class: 'panel' },
-      h('div', { class: 'setting' }, h('div', {}, h('div', { class: 'label', text: 'Miek 0.3.0' }), h('div', { class: 'fine', text: 'Open source · MIT license · no accounts, no ads, no tracking. Sources: Soulseek, your files, the Internet Archive and Wikimedia Commons.' })))));
+      h('div', { class: 'setting' }, h('div', {}, h('div', { class: 'label', text: 'Miek' }), h('div', { class: 'fine', text: 'Open source · MIT license · no accounts, no ads, no tracking. Sources: Soulseek, your files, the Internet Archive and Wikimedia Commons.' })))));
     return out;
   },
 };

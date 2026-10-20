@@ -366,3 +366,10 @@ input[type="range"]:hover::-webkit-slider-thumb, input[type="range"]:active::-we
 .slsk-head .sortable:hover { color: var(--ink); }
 .slsk-head .sortable[data-dir]:not([data-dir=""])::after { content: ' ' attr(data-dir); color: var(--ink); }
 .chip.hidden { display: none; }
+
+/* ---------------------------------------------------------------- update pop-up */
+.upd { max-width: 460px; }
+.upd-notes { max-height: 180px; overflow-y: auto; white-space: pre-wrap; font-size: 13px; color: var(--ink-2); border: 1px solid var(--hair); border-radius: 10px; padding: 10px 12px; margin: 10px 0; }
+.upd-bar { height: 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.08); overflow: hidden; margin: 12px 0 4px; }
+.upd-fill { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+.upd-status { min-height: 1.5em; }
