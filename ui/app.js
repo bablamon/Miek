@@ -67,6 +67,8 @@ function openArtist(t, name) {
   else searchFor(name);
 }
 
+const LOSSLESS = new Set(['flac', 'alac', 'wav', 'aiff']);
+
 // ===================================================================== local music (indexed by the Rust side)
 const LOCAL = { folders: [], tracks: [], albums: [], byAlbum: new Map(), byArtist: new Map(), scanning: false };
 
@@ -88,6 +90,9 @@ function localTrack(x) {
     year: x.year || null,
     genre: x.genre || null,
     quality: q,
+    lossless: LOSSLESS.has(x.codec),
+    bits: x.bitDepth || null,
+    rate: x.sampleRate || null,
   };
 }
 function indexLocal(data) {
@@ -142,19 +147,96 @@ function iaTrack(item, t) {
     uri: t.uri,
     source: 'ia',
     src: { kind: 'url', value: t.url },
-    name: t.name,
+    name: t.name.replace(/\s*-?>\s*$/, ''), // live recordings mark segues with ">" / "->"
     artists: [{ name: t.artist || item.creator || 'Unknown artist' }],
     album: { key: 'ia:' + item.id, name: item.title },
     image: item.image,
     duration: Math.round((t.duration || 0) * 1000),
     number: t.number,
     quality: t.format,
+    lossless: true,
+    // the Archive labels 24-bit masters separately; its plain "Flac" files are 16-bit
+    bits: /24/.test(t.format) ? 24 : 16,
+    rate: null,
   };
 }
+// ===================================================================== Wikimedia Commons (single FLAC files, no account)
+function wcTrack(t) {
+  return {
+    uri: t.uri,
+    source: 'commons',
+    src: { kind: 'url', value: t.url },
+    name: t.name,
+    artists: [{ name: t.artist || 'Unknown artist' }],
+    album: null,
+    image: null,
+    duration: Math.round((t.duration || 0) * 1000),
+    quality: [t.format, t.license].filter(Boolean).join(' · '),
+    lossless: true,
+    bits: t.bitDepth || null,
+    rate: t.sampleRate || null,
+  };
+}
+
 const IA_CACHE = new Map();
 function iaItem(id) {
   if (!IA_CACHE.has(id)) IA_CACHE.set(id, invoke('ia_item', { id }).catch((e) => { IA_CACHE.delete(id); throw e; }));
   return IA_CACHE.get(id);
+}
+
+// ===================================================================== best version: one song, every source, best lossless copy first
+const SOURCE_NAMES = { local: 'Your music', ia: 'Internet Archive', commons: 'Wikimedia Commons' };
+const words = (s) => norm(s).replace(/[^\p{L}\p{N}]+/gu, ' ').split(' ').filter((w) => w.length > 1);
+// does the track contain every word of the search (title + artists)?
+const matches = (t, q) => { const have = new Set(words(t.name + ' ' + t.artists.map((a) => a.name).join(' '))); return q.length && q.every((w) => have.has(w)); };
+// a song's identifying words: no "Composer - " prefix, bracketed notes, leading track number,
+// artist names or filler words. Opus/movement numbers stay, so different works stay apart.
+const FILLER = new Set(['op', 'no', 'nr', 'in', 'the', 'of', 'and', 'live']);
+function songWords(t) {
+  const artist = new Set(t.artists.flatMap((a) => words(a.name)));
+  const title = t.name.replace(/^[^-–]{1,40}\s[-–]\s(?=\S)/, '').replace(/[([{].*?[)\]}]/g, ' ').replace(/^\s*\d+[\s.)_-]+/, '');
+  const w = words(title).filter((x) => !artist.has(x) && !FILLER.has(x));
+  return w.length ? w : words(t.name);
+}
+// same song if one title's words contain the other's and cover at least half of it
+// ("Coriolan Overture" = "Coriolan Overture Op. 62", but not a long title that merely mentions it)
+function sameSong(a, b) {
+  const [small, big] = a.length <= b.length ? [a, b] : [b, a];
+  if (small.length * 2 < big.length) return false;
+  if (small.length < 2) return small.length === big.length && small[0] === big[0];
+  const set = new Set(big);
+  return small.every((x) => set.has(x));
+}
+// higher is better: lossless, then bit depth, then sample rate; your own file wins a tie (no streaming)
+function better(a, b) {
+  return (b.lossless ? 1 : 0) - (a.lossless ? 1 : 0) || (b.bits || 0) - (a.bits || 0) || (b.rate || 0) - (a.rate || 0) || (a.source === 'local' ? -1 : 0) - (b.source === 'local' ? -1 : 0);
+}
+async function bestVersions(term) {
+  const q = words(term);
+  const local = LOCAL.tracks.filter((t) => t.lossless && matches(t, q));
+  const [commons, archive] = await Promise.all([
+    invoke('commons_search', { term }).then((r) => r.map(wcTrack)).catch(() => []),
+    // songs inside the top Archive results
+    invoke('ia_search', { term })
+      .then((items) => Promise.all(items.slice(0, 3).map((it) => iaItem(it.id).then((d) => d.tracks.map((t) => iaTrack(d, t))).catch(() => []))))
+      .then((lists) => lists.flat())
+      .catch(() => []),
+  ]);
+  const groups = [];
+  for (const t of [...local, ...commons, ...archive].filter((t) => matches(t, q))) {
+    const w = songWords(t);
+    const g = groups.find((g) => sameSong(g.words, w));
+    if (g) g.versions.push(t);
+    else groups.push({ words: w, versions: [t] });
+  }
+  return groups.map((g) => {
+    g.versions.sort(better);
+    const [best, ...rest] = g.versions;
+    const note = `${SOURCE_NAMES[best.source]}${rest.length ? ` · best of ${g.versions.length} versions` : ''}`;
+    // relevance: how much of the song's title the search covers (in quarters, so quality decides close calls)
+    const rel = Math.round((4 * Math.min(q.length, g.words.length)) / Math.max(q.length, g.words.length));
+    return { ...best, quality: [best.quality, note].filter(Boolean).join(' · '), alternates: rest, rel };
+  }).sort((a, b) => b.rel - a.rel || better(a, b)).slice(0, 12);
 }
 
 // ===================================================================== library (likes, playlists, history) — local JSON
@@ -390,6 +472,14 @@ function lazyShelf(load) {
     .catch(() => el.replaceChildren(h('p', { class: 'fine', text: 'The Internet Archive is unreachable right now.' })));
   return el;
 }
+// lazily filled track list (network search)
+function lazyTracks(load, name) {
+  const el = h('div', {}, h('p', { class: 'fine', text: 'Searching…' }));
+  load()
+    .then((tracks) => el.replaceChildren(tracks.length ? trackList(tracks, (i) => playList(tracks, i)) : h('p', { class: 'fine', text: 'Nothing found here.' })))
+    .catch(() => el.replaceChildren(h('p', { class: 'fine', text: `${name} is unreachable right now.` })));
+  return el;
+}
 const SHELVES = [['live', 'Live concerts'], ['jazz', 'Jazz'], ['classical', 'Classical'], ['electronic', 'Electronic'], ['netlabels', 'Netlabel releases'], ['78rpm', '78 rpm records']];
 const iaShelf = (kind) => lazyShelf(async () => (await invoke('ia_shelf', { kind })).map((it) => albumCard(iaAlbumCard(it))));
 
@@ -407,7 +497,7 @@ const VIEWS = {
     const out = h('div', {}, greeting());
     if (!LOCAL.folders.length && !d.recent.length) {
       out.append(
-        h('p', { class: 'muted', style: 'max-width:560px;line-height:1.6;margin-top:10px', text: 'Miek plays lossless audio — your own FLAC, ALAC, WAV and AIFF files, plus nearly a million lossless recordings on the Internet Archive. No accounts, no ads.' }),
+        h('p', { class: 'muted', style: 'max-width:560px;line-height:1.6;margin-top:10px', text: 'Miek plays lossless audio — your own FLAC, ALAC, WAV and AIFF files, nearly a million lossless recordings on the Internet Archive, and FLAC music from Wikimedia Commons. No accounts, no ads.' }),
         h('div', { class: 'actions' },
           h('button', { class: 'btn primary', onclick: addFolder }, icon('folder', 16), 'Add your music folder'),
           h('button', { class: 'btn', onclick: () => go('explore') }, icon('globe', 16), 'Explore the Internet Archive')));
@@ -434,10 +524,12 @@ const VIEWS = {
     const songs = LOCAL.tracks.filter((t) => norm(t.name).includes(q) || t.artists.some((a) => norm(a.name).includes(q)) || norm(t.album.name).includes(q)).slice(0, 12);
     const albums = LOCAL.albums.filter((a) => norm(a.name).includes(q) || norm(a.artist).includes(q)).slice(0, 16);
     const artists = [...LOCAL.byArtist.values()].filter((a) => norm(a.name).includes(q)).slice(0, 12);
+    out.append(section('Best versions'), lazyTracks(() => bestVersions(term), 'Lossless sources'));
     if (songs.length) out.append(section('Your songs'), trackList(songs, (i) => playList(songs, i)));
     if (artists.length) out.append(section('Your artists'), shelf(artists.map(artistCard)));
     if (albums.length) out.append(section('Your albums'), shelf(albums.map((a) => albumCard(localAlbumCard(a)))));
     out.append(section('Internet Archive · lossless'), lazyShelf(async () => (await invoke('ia_search', { term })).map((it) => albumCard(iaAlbumCard(it)))));
+    out.append(section('Wikimedia Commons · lossless'), lazyTracks(async () => (await invoke('commons_search', { term })).map(wcTrack), 'Wikimedia Commons'));
     return out;
   },
 
@@ -558,7 +650,7 @@ const VIEWS = {
       h('div', { class: 'setting' }, h('div', {}, h('div', { class: 'label', text: 'Replay intro' })), h('button', { class: 'btn', onclick: () => playIntro() }, 'Play'))));
 
     out.append(section('About'), h('div', { class: 'panel' },
-      h('div', { class: 'setting' }, h('div', {}, h('div', { class: 'label', text: 'Miek 0.3.0' }), h('div', { class: 'fine', text: 'Open source · MIT license · no accounts, no ads, no tracking. Sources: your files and the Internet Archive.' })))));
+      h('div', { class: 'setting' }, h('div', {}, h('div', { class: 'label', text: 'Miek 0.3.0' }), h('div', { class: 'fine', text: 'Open source · MIT license · no accounts, no ads, no tracking. Sources: your files, the Internet Archive and Wikimedia Commons.' })))));
     return out;
   },
 };
@@ -728,7 +820,14 @@ async function pollState() {
   } else qb.classList.add('hidden');
   if ((s.status === 'ended' || s.status === 'error') && s.seq === Q.seq && S.handledSeq !== s.seq) {
     S.handledSeq = s.seq;
-    if (s.status === 'error') { toast(`Couldn’t play “${current() ? current().name : 'track'}”: ${s.error || 'unknown error'}`); setTimeout(() => next(true), 900); }
+    const cur = current();
+    if (s.status === 'error' && cur && cur.alternates && cur.alternates.length) {
+      // the best source failed: stream the next-best version of the same song instead
+      const [alt, ...rest] = cur.alternates;
+      Q.list[Q.i] = { ...alt, alternates: rest };
+      toast(`Couldn’t stream from ${SOURCE_NAMES[cur.source] || 'that source'}; trying ${SOURCE_NAMES[alt.source] || 'another source'}`);
+      loadIndex(Q.i);
+    } else if (s.status === 'error') { toast(`Couldn’t play “${cur ? cur.name : 'track'}”: ${s.error || 'unknown error'}`); setTimeout(() => next(true), 900); }
     else next(true);
   }
 }

@@ -109,7 +109,7 @@ pub async fn ia_shelf(kind: String) -> Result<Vec<Item>, String> {
 }
 
 /// Archive descriptions are HTML: keep readable plain text (line breaks kept, entities decoded).
-fn plain_text(html: &str) -> String {
+pub(crate) fn plain_text(html: &str) -> String {
     let mut out = String::new();
     let mut tag = String::new();
     let mut in_tag = false;
