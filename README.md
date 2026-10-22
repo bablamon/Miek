@@ -65,7 +65,13 @@ git tag -a v0.4.0 -m "What's new: ..."
 git push origin main v0.4.0
 ```
 
-The tag starts `.github/workflows/release.yml`: it builds the installer, signs it, and publishes the GitHub release with `latest.json`. The tag message becomes the release notes in the pop-up.
+The tag starts `.github/workflows/release.yml`: it builds, signs, and publishes the GitHub release with `latest.json` and three downloads:
+
+- `Miek_<version>_x64-setup.exe`: installer (current user, no admin prompt); in-app updates use this one
+- `Miek_<version>_x64_en-US.msi`: MSI installer (all users, needs admin)
+- `Miek_<version>_x64_portable.exe`: the app on its own, no install (needs WebView2, which Windows 10/11 have)
+
+The tag message becomes the release notes in the pop-up.
 
 ## Project layout
 

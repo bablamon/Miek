@@ -45,7 +45,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": ["nsis", "msi"],
     "publisher": "Miek",
     "shortDescription": "Lossless music player",
     "windows": {

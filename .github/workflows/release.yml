@@ -67,4 +67,14 @@ jobs:
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
+          # installs come from the setup.exe: updates must be the setup.exe too, not the MSI
+          updaterJsonPreferNsis: true
           args: --config src-tauri/tauri.release.conf.json
+
+      - name: Attach the portable app (runs without installing)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          cp src-tauri/target/release/miek.exe "Miek_${v}_x64_portable.exe"
+          gh release upload "$GITHUB_REF_NAME" "Miek_${v}_x64_portable.exe" --clobber
