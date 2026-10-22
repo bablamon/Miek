@@ -38,7 +38,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQxRTdCQ0IxNzcyM0YyQUUKUldTdThpTjNzYnpuMFN4b3NiY3M5Y0JxYWhGVVpvZkJMbS8wNXVtZnFJTDBjRHZIV3hXbWtFRlMK",
       "endpoints": ["https://github.com/bablamon/Miek/releases/latest/download/latest.json"],
       "windows": { "installMode": "passive" }
     }
