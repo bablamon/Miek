@@ -69,6 +69,8 @@ enum Cmd {
     Toggle,
     /// pause if playing; never resumes or restarts (a toggle on a track that just ended restarts it)
     Pause,
+    /// play if paused (or start an ended track again); never pauses
+    Resume,
     Seek(f64),
 }
 
@@ -114,7 +116,7 @@ impl Player {
         match c {
             Cmd::Load { .. } => INTERRUPT.fetch_max(BY_LOAD, Ordering::SeqCst),
             Cmd::Seek(_) => INTERRUPT.fetch_max(BY_SEEK, Ordering::SeqCst),
-            Cmd::Toggle | Cmd::Pause => 0,
+            Cmd::Toggle | Cmd::Pause | Cmd::Resume => 0,
         };
         let _ = self.tx.lock().unwrap().send(c);
     }
@@ -148,6 +150,10 @@ pub fn player_toggle(p: tauri::State<'_, Player>) {
 #[tauri::command]
 pub fn player_pause(p: tauri::State<'_, Player>) {
     p.send(Cmd::Pause);
+}
+#[tauri::command]
+pub fn player_resume(p: tauri::State<'_, Player>) {
+    p.send(Cmd::Resume);
 }
 #[tauri::command]
 pub fn player_seek(p: tauri::State<'_, Player>, secs: f64) {
@@ -1088,6 +1094,11 @@ impl Engine {
                         }
                     }
                     _ => {}
+                }
+            }
+            Cmd::Resume => {
+                if matches!(self.info.lock().unwrap().status, "paused" | "ended") {
+                    self.handle(Cmd::Toggle);
                 }
             }
             Cmd::Pause => {

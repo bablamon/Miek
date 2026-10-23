@@ -806,7 +806,7 @@ async function pollState() {
   // a loaded song sitting paused while you want music: start it (e.g. a Play press landed while it loaded)
   if (PLAY.want && Q.seq !== -1 && s.seq === Q.seq && s.status === 'paused' && Date.now() - PLAY.nudged > 1500) {
     PLAY.nudged = Date.now();
-    invoke('player_toggle').catch(() => {});
+    invoke('player_resume').catch(() => {});
   }
   if (SL.waiting) $('play').title = 'Stop waiting';
   const cur0 = current();
@@ -924,9 +924,11 @@ $('play').onclick = () => {
   if (slskCancelWait()) return;
   if (current() && Q.seq === -1) return loadIndex(Q.i); // try that Soulseek file again
   if (!current()) { const r = LIB.data.recent[0]; return r ? playOne(r) : toast('Pick something to play'); }
-  const st = S.player && S.player.status;
-  PLAY.want = !(st === 'playing' || st === 'loading');
-  invoke('player_toggle').then(pollState).catch(fail);
+  // explicit pause / resume from the player's state right now (a toggle on a stale state can flip the wrong way)
+  invoke('player_state').then((s) => {
+    PLAY.want = !(s.status === 'playing' || s.status === 'loading');
+    return invoke(PLAY.want ? 'player_resume' : 'player_pause');
+  }).then(pollState).catch(fail);
 };
 $('next').onclick = () => next(false);
 $('prev').onclick = prev;

@@ -23,6 +23,7 @@ fn main() {
             player::player_load,
             player::player_toggle,
             player::player_pause,
+            player::player_resume,
             player::player_seek,
             player::player_volume,
             player::player_state,

@@ -104,7 +104,7 @@ The tag message becomes the release notes in the pop-up.
 
 Miek is MIT licensed (see `LICENSE`).
 
-- Icons from [Framework7 Icons](https://framework7.io/icons), made to match Apple's SF Symbols (MIT, `ui/icons-LICENSE.txt`)
+- Icons: Google's [Material Symbols](https://fonts.google.com/icons) (Rounded), as on Pixel phones (Apache 2.0, `ui/icons-LICENSE.txt`)
 - [Ubuntu](https://design.ubuntu.com/font) font (Ubuntu Font Licence 1.0, `ui/fonts/UBUNTU-FONT-LICENCE.txt`)
 - Audio: Symphonia (MPL-2.0), rubato (MIT), cpal (Apache-2.0), lofty (MIT/Apache-2.0); app shell: Tauri (MIT/Apache-2.0)
 
