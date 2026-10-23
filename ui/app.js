@@ -380,6 +380,27 @@ function prev() {
   loadIndex(Q.i - 1);
 }
 
+// ===================================================================== search mode
+// Fast: YouTube (almost any song, instant, AAC ~128 kbps). Lossless: FLAC from Soulseek (lossless
+// files only), the Internet Archive and Commons (studio quality, slower, fewer songs). Your own
+// music shows in both. The switch sits next to the search box.
+const MODE = {
+  get() { try { return localStorage.getItem('miek.mode') === 'lossless' ? 'lossless' : 'fast'; } catch { return 'fast'; } },
+  set(m) {
+    try { localStorage.setItem('miek.mode', m); } catch {}
+    MODE.show();
+    if (typeof SLSK_VIEW !== 'undefined') SLSK_VIEW.prefs.lossless = m === 'lossless'; // Soulseek starts on lossless files
+    const r = R.stack[R.i];
+    if (r && r.route === 'search') refresh();
+  },
+  show() {
+    const m = MODE.get();
+    document.querySelectorAll('#mode button').forEach((b) => { b.classList.toggle('on', b.dataset.mode === m); b.setAttribute('aria-checked', b.dataset.mode === m); });
+  },
+};
+document.querySelectorAll('#mode button').forEach((b) => (b.onclick = () => MODE.set(b.dataset.mode)));
+MODE.show();
+
 // ===================================================================== router
 const R = { stack: [], i: -1 };
 function go(route, arg, push = true) {
@@ -531,17 +552,25 @@ const VIEWS = {
   search(term) {
     if (!term) return VIEWS.home();
     const q = norm(term);
-    const out = h('div', {}, h('div', { class: 'page-title', style: 'font-size:44px' }, 'Results for ', h('em', { text: term })));
+    const fast = MODE.get() === 'fast';
+    const out = h('div', {}, h('div', { class: 'page-title', style: 'font-size:44px' }, 'Results for ', h('em', { text: term })),
+      h('p', { class: 'mode-note' }, fast
+        ? 'Fast: from YouTube, starts instantly, AAC at about 128 kbps. For studio-quality FLAC, '
+        : 'Lossless: studio-quality FLAC from Soulseek, the Internet Archive and Wikimedia Commons; slower to start and fewer songs. For almost anything at 128 kbps, ',
+        h('a', { class: 'lnk', text: fast ? 'switch to Lossless' : 'switch to Fast', onclick: () => MODE.set(fast ? 'lossless' : 'fast') }), '.'));
     const songs = LOCAL.tracks.filter((t) => norm(t.name).includes(q) || t.artists.some((a) => norm(a.name).includes(q)) || norm(t.album.name).includes(q)).slice(0, 12);
     const albums = LOCAL.albums.filter((a) => norm(a.name).includes(q) || norm(a.artist).includes(q)).slice(0, 16);
     const artists = [...LOCAL.byArtist.values()].filter((a) => norm(a.name).includes(q)).slice(0, 12);
-    out.append(section('Soulseek'), soulseekResults(term));
-    out.append(section('YouTube'), youtubeResults(term));
+    // your own music shows in both; the network sources follow the mode
+    if (fast) out.append(section('YouTube'), youtubeResults(term));
+    else out.append(section('Soulseek'), soulseekResults(term));
     if (songs.length) out.append(section('Your songs'), trackList(songs, (i) => playList(songs, i)));
     if (artists.length) out.append(section('Your artists'), shelf(artists.map(artistCard)));
     if (albums.length) out.append(section('Your albums'), shelf(albums.map((a) => albumCard(localAlbumCard(a)))));
-    out.append(section('Internet Archive · lossless'), lazyShelf(async () => (await invoke('ia_search', { term })).map((it) => albumCard(iaAlbumCard(it)))));
-    out.append(section('Wikimedia Commons · lossless'), lazyTracks(async () => (await invoke('commons_search', { term })).map(wcTrack), 'Wikimedia Commons'));
+    if (!fast) {
+      out.append(section('Internet Archive · lossless'), lazyShelf(async () => (await invoke('ia_search', { term })).map((it) => albumCard(iaAlbumCard(it)))));
+      out.append(section('Wikimedia Commons · lossless'), lazyTracks(async () => (await invoke('commons_search', { term })).map(wcTrack), 'Wikimedia Commons'));
+    }
     return out;
   },
 

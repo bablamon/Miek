@@ -65,7 +65,7 @@ function slskNote(st) {
   return h('div', { class: 'slsk-note' }, h('span', { text: msg }), h('button', { class: 'btn', onclick: () => go('settings') }, icon('settings', 15), 'Soulseek settings'));
 }
 // the results page: the last search (reused when the page is rebuilt) and your filters and sort
-const SLSK_VIEW = { last: null, prefs: { lossless: false, free: false, sort: null, dir: 1 } };
+const SLSK_VIEW = { last: null, prefs: { lossless: MODE.get() === 'lossless', free: false, sort: null, dir: 1 } }; // Lossless mode starts on lossless files
 const FORMAT_ORDER = (ext) => (ext === 'flac' ? 0 : ext === 'mp3' ? 1 : 2);
 // live results: filled in as peers answer, until the search runs out or the user leaves the page
 function soulseekResults(term) {

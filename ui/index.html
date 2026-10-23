@@ -20,6 +20,10 @@
       <input id="search" type="search" placeholder="Search songs, artists, albums" autocomplete="off" spellcheck="false" />
       <kbd>Ctrl L</kbd>
     </label>
+    <div id="mode" class="mode" role="radiogroup" aria-label="What to search and stream">
+      <button data-mode="fast" role="radio" title="Fast: almost any song, from YouTube. Starts instantly. AAC at about 128 kbps."><b>Fast</b><span>128 kbps · biggest library</span></button>
+      <button data-mode="lossless" role="radio" title="Lossless: studio-quality FLAC from Soulseek, the Internet Archive, Wikimedia Commons and your music. Slower to start, smaller library."><b>Lossless</b><span>studio quality · slower</span></button>
+    </div>
     <div class="spacer" data-tauri-drag-region></div>
     <div class="winctl">
       <button id="win-min" title="Minimize" data-icon="minus"></button>

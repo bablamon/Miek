@@ -376,3 +376,13 @@ input[type="range"]:hover::-webkit-slider-thumb, input[type="range"]:active::-we
 .upd-bar { height: 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.08); overflow: hidden; margin: 12px 0 4px; }
 .upd-fill { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
 .upd-status { min-height: 1.5em; }
+
+/* ---------------------------------------------------------------- Fast / Lossless switch by the search box */
+.mode { display: flex; gap: 2px; padding: 3px; border-radius: 12px; background: rgba(255, 255, 255, 0.05); border: 1px solid var(--hair); flex: none; }
+.mode button { display: flex; flex-direction: column; align-items: flex-start; padding: 3px 12px; border-radius: 9px; color: var(--ink-3); line-height: 1.15; transition: background .12s, color .12s; }
+.mode button b { font-size: 12.5px; font-weight: 600; color: var(--ink-2); }
+.mode button span { font-size: 10.5px; }
+.mode button:hover { color: var(--ink-2); background: rgba(255, 255, 255, 0.06); }
+.mode button.on { background: rgba(255, 255, 255, 0.14); color: var(--ink-2); }
+.mode button.on b { color: var(--ink); }
+.mode-note { color: var(--ink-2); font-size: 13.5px; margin: 6px 0 0; max-width: 760px; }
