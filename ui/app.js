@@ -207,7 +207,7 @@ function songWords(t) {
 
 // ===================================================================== library (likes, playlists, history) — local JSON
 const LIB = { data: { liked: [], albums: [], playlists: [], recent: [] }, liked: new Set(), timer: null };
-const slimTrack = (t) => ({ uri: t.uri, source: t.source, src: t.src, slsk: t.slsk || null, folder: t.folder || null, name: t.name, artists: t.artists, album: t.album, image: t.image, duration: t.duration, quality: t.quality || '', genre: t.genre || null, tags: t.tags || [], lossless: !!t.lossless, bits: t.bits || null, rate: t.rate || null });
+const slimTrack = (t) => ({ uri: t.uri, source: t.source, src: t.src, slsk: t.slsk || null, yt: t.yt || null, folder: t.folder || null, name: t.name, artists: t.artists, album: t.album, image: t.image, duration: t.duration, quality: t.quality || '', genre: t.genre || null, tags: t.tags || [], lossless: !!t.lossless, bits: t.bits || null, rate: t.rate || null });
 
 function reindex() { LIB.liked = new Set(LIB.data.liked.map((t) => t.uri)); }
 async function libLoad() {
@@ -296,13 +296,21 @@ async function loadIndex(i, autoplay = true, advancing = false) {
     } else {
       SL.wait++;
       invoke('slsk_stop_streams').catch(() => {});
-      Q.seq = await invoke('player_load', { src: t.src, autoplay });
+      let src = t.src;
+      if (t.yt) {
+        // a YouTube video: its stream link is resolved now (a few seconds; links expire)
+        Q.seq = -1;
+        invoke('player_pause').catch(() => {});
+        src = await ytStream(t);
+        if (current() !== t) return; // moved on meanwhile
+      }
+      Q.seq = await invoke('player_load', { src, autoplay });
     }
   } catch (e) {
     fail(e);
     if (t.slsk && current() === t) SL.failed = String(e).replace(/^Error:\s*/, '');
-    // a Soulseek file you picked stays put; one reached by Next, the end of a song or Autoplay is skipped
-    if (t.slsk && (t.radio || advancing)) setTimeout(() => current() === t && next(true), 1500);
+    // a Soulseek file or video you picked stays put; one reached by Next, the end of a song or Autoplay is skipped
+    if ((t.slsk || t.yt) && (t.radio || advancing)) setTimeout(() => current() === t && next(true), 1500);
   }
   prefetchNext();
   topUpAutoplay();
@@ -311,6 +319,7 @@ async function loadIndex(i, autoplay = true, advancing = false) {
 function prefetchNext() {
   const t = Q.list[Q.i + 1];
   if (t && t.src && t.src.kind === 'url') invoke('player_prefetch', { src: t.src }).catch(() => {});
+  if (t && t.yt) ytStream(t).then((src) => invoke('player_prefetch', { src })).catch(() => {});
   // a Soulseek file: once the one playing has fully arrived, so the two don't share the bandwidth
   const cur = current();
   if (t && t.slsk && !(cur && cur.slsk && (!SL.info || SL.info.state !== 'done'))) {
@@ -527,6 +536,7 @@ const VIEWS = {
     const albums = LOCAL.albums.filter((a) => norm(a.name).includes(q) || norm(a.artist).includes(q)).slice(0, 16);
     const artists = [...LOCAL.byArtist.values()].filter((a) => norm(a.name).includes(q)).slice(0, 12);
     out.append(section('Soulseek'), soulseekResults(term));
+    out.append(section('YouTube'), youtubeResults(term));
     if (songs.length) out.append(section('Your songs'), trackList(songs, (i) => playList(songs, i)));
     if (artists.length) out.append(section('Your artists'), shelf(artists.map(artistCard)));
     if (albums.length) out.append(section('Your albums'), shelf(albums.map((a) => albumCard(localAlbumCard(a)))));
@@ -646,6 +656,7 @@ const VIEWS = {
         h('div', { class: 'fine', style: 'max-width:320px;text-align:right', text: 'Decoded natively in 32-bit float. Resampled with a high-quality sinc filter only when the source rate differs from the device.' }))));
 
     out.append(section('Soulseek'), soulseekSettings());
+    out.append(section('YouTube'), youtubeSettings());
     out.append(section('Autoplay'), autoplaySettings());
 
     const soundBtn = h('button', { class: 'btn' }, introPrefs.sound ? 'On' : 'Off');

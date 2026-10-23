@@ -343,7 +343,8 @@ fn cache_dir() -> std::path::PathBuf {
 }
 pub(crate) fn cache_path(url: &str) -> std::path::PathBuf {
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hash::hash(url, &mut h);
+    // YouTube's links expire and change; the same video + format is the same file
+    std::hash::Hash::hash(youtube_key(url).as_deref().unwrap_or(url), &mut h);
     cache_dir().join(format!("{:016x}", std::hash::Hasher::finish(&h)))
 }
 
@@ -384,6 +385,19 @@ fn http_client() -> reqwest::blocking::Client {
 
 // archive.org/download/<item>/… redirects to the storage server holding the item; remember it per item
 static REDIRECTS: Mutex<Option<std::collections::HashMap<String, String>>> = Mutex::new(None);
+/// A YouTube media server link (from yt-dlp): served fast in byte ranges, slowly as one download.
+fn is_youtube(url: &str) -> bool {
+    url.strip_prefix("https://").and_then(|r| r.split('/').next()).is_some_and(|host| host.ends_with(".googlevideo.com"))
+}
+/// "yt:<id>:<itag>:<length>" from a YouTube link's query, stable while the link itself expires.
+fn youtube_key(url: &str) -> Option<String> {
+    if !is_youtube(url) {
+        return None;
+    }
+    let q = url.split_once('?')?.1;
+    let get = |k: &str| q.split('&').find_map(|kv| kv.strip_prefix(k).and_then(|v| v.strip_prefix('=')));
+    Some(format!("yt:{}:{}:{}", get("id")?, get("itag")?, get("clen").unwrap_or("")))
+}
 fn archive_key(url: &str) -> Option<(&str, &str)> {
     let rest = url.strip_prefix("https://archive.org/download/")?;
     let slash = rest.find('/')?;
@@ -501,7 +515,8 @@ impl StreamSource {
         // Parallel chunks only for the Internet Archive: its servers are slow per connection and
         // allow parallel ranges. Others (Wikimedia rate-limits parallel requests) get one connection.
         // First request: a small range; 206 = the server does ranges (chunked mode).
-        let parallel = archive_key(url).is_some();
+        // (YouTube too: a plain download of its links comes at about real-time speed, ranges at full speed)
+        let parallel = archive_key(url).is_some() || is_youtube(url);
         let first = |u: &str| {
             let req = client.get(u);
             let req = if parallel { req.header("Range", format!("bytes=0-{}", FIRST_CHUNK - 1)) } else { req };

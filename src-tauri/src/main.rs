@@ -7,6 +7,7 @@ mod local;
 mod player;
 mod slsk;
 mod update;
+mod ytdlp;
 
 fn main() {
     tauri::Builder::default()
@@ -51,7 +52,11 @@ fn main() {
             update::app_version,
             update::update_check,
             update::update_install,
-            update::update_progress
+            update::update_progress,
+            ytdlp::yt_status,
+            ytdlp::yt_search,
+            ytdlp::yt_resolve,
+            ytdlp::yt_update
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Miek");
