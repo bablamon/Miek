@@ -71,20 +71,34 @@ async function archiveTracks(items, n) {
 // one copy per song: FLAC over MP3 over the rest, then a free slot, a short queue, a fast peer
 const SLSK_CANDIDATES = new Map(); // artist → { at, list }; spares the network repeated searches
 // (`artist` false: a plain keyword search, e.g. "bollywood"; artists then come from each file's path)
+// What Soulseek answers for a search, kept 10 minutes (Autoplay and Explore ask for the same artists)
+const SLSK_HITS = new Map(); // term → { at, hits: Promise }
+function soulseekHits(term) {
+  const key = norm(term);
+  const cached = SLSK_HITS.get(key);
+  if (cached && Date.now() - cached.at < 10 * 60e3) return cached.hits;
+  const hits = (async () => {
+    const token = await invoke('slsk_search', { query: term });
+    // peers answer over several seconds: stop early once there's plenty, wait longer when answers are few
+    const out = [];
+    for (let waited = 0; ; ) {
+      await sleep(500);
+      waited += 500;
+      const r = await invoke('slsk_results', { token, from: out.length });
+      out.push(...r.hits);
+      if (r.done || waited >= 12000 || (waited >= 2000 && out.length >= 60)) break;
+    }
+    return out;
+  })();
+  hits.catch(() => SLSK_HITS.delete(key));
+  SLSK_HITS.set(key, { at: Date.now(), hits });
+  return hits;
+}
 async function soulseekCandidates(artist, asArtist = true) {
   const key = norm(artist);
   const cached = SLSK_CANDIDATES.get(key);
   if (cached && Date.now() - cached.at < 10 * 60e3) return cached.list;
-  const token = await invoke('slsk_search', { query: artist });
-  // peers answer over several seconds: stop early once there's plenty, wait longer when answers are few
-  const hits = [];
-  for (let waited = 0; ; ) {
-    await sleep(500);
-    waited += 500;
-    const r = await invoke('slsk_results', { token, from: hits.length });
-    hits.push(...r.hits);
-    if (r.done || waited >= 12000 || (waited >= 2000 && hits.length >= 60)) break;
-  }
+  const hits = await soulseekHits(artist);
   const want = words(artist);
   const rank = (x) => [FORMAT_ORDER(x.ext), x.slotFree ? 0 : 1, x.queue, -x.speed];
   const better = (a, b) => { const [p, q] = [rank(a), rank(b)]; for (let i = 0; i < p.length; i++) if (p[i] !== q[i]) return p[i] < q[i]; return false; };
@@ -106,8 +120,18 @@ async function soulseekCandidates(artist, asArtist = true) {
 async function slskOnline() {
   try { return (await invoke('slsk_status')).state === 'online'; } catch { return false; }
 }
-// same song, whichever copy: first artist + the title's identifying words
-const songKey = (t) => (artistKeys(t)[0] || '') + '|' + songWords(t).join(' ');
+// Same song, whichever copy: the title's identifying words, and at least one artist in common
+// ("Pritam, Arijit Singh - Tum Hi Ho" is the "Tum Hi Ho" by Arijit Singh you just heard).
+// A song set to look songs up in: title words → the artist sets of songs with that title.
+function songSet(tracks = []) {
+  const m = new Map();
+  const set = {
+    has: (t) => (m.get(songWords(t).join(' ')) || []).some((as) => artistKeys(t).some((a) => as.has(a)) || (!as.size && !artistKeys(t).length)),
+    add: (t) => { const k = songWords(t).join(' '); if (!m.has(k)) m.set(k, []); m.get(k).push(new Set(artistKeys(t))); return set; },
+  };
+  tracks.forEach((t) => set.add(t));
+  return set;
+}
 
 // ----------------------------------------------------------------- language
 // Autoplay keeps to the language you're listening in. A song's language comes from its script, from
@@ -171,6 +195,7 @@ function languages(tracks) {
 }
 // the language you're listening in now: the current song's, else the session's most common
 function sessionLanguage(session, langOf) {
+  if (!session.length) return null; // nothing played yet
   const cur = langOf(session[session.length - 1]);
   if (cur) return cur;
   const c = new Map();
@@ -229,16 +254,15 @@ function score(c, ctx) {
 function pickDiverse(scored, n, lastArtist) {
   const perArtist = new Map();
   const perAlbum = new Map();
-  const songs = new Set();
+  const songs = songSet();
   const pool = [];
   for (const c of scored) {
     const a = artistKeys(c)[0] || '';
     const al = (c.album && c.album.key) || c.uri;
-    const song = songKey(c);
-    if ((perArtist.get(a) || 0) >= 2 || (perAlbum.get(al) || 0) >= 2 || songs.has(song)) continue;
+    if ((perArtist.get(a) || 0) >= 2 || (perAlbum.get(al) || 0) >= 2 || songs.has(c)) continue;
     perArtist.set(a, (perArtist.get(a) || 0) + 1);
     perAlbum.set(al, (perAlbum.get(al) || 0) + 1);
-    songs.add(song);
+    songs.add(c);
     pool.push(c);
     if (pool.length >= n * 2) break;
   }
@@ -264,7 +288,7 @@ async function recommend(n = 8) {
   const T = taste();
   const recent = new Set(LIB.data.recent.slice(0, 25).map((t) => t.uri));
   // songs just heard or already queued, as songs: another user's copy of the same song is no new song
-  const heard = new Set([...session, ...LIB.data.recent.slice(0, 25), ...Q.list.slice(Q.i + 1)].map(songKey));
+  const heard = songSet([...session, ...LIB.data.recent.slice(0, 25), ...Q.list.slice(Q.i + 1)]);
   // in the session's language: for English, anything not known to be another language; for any
   // other language, only songs known to be in it (better a shorter queue than the wrong language)
   const sameLanguage = (c) => {
@@ -276,7 +300,7 @@ async function recommend(n = 8) {
   const fresh = candidates.filter((c) => {
     if (!c || !c.uri || seen.has(c.uri)) return false;
     seen.add(c.uri);
-    return !Q.radioSeen.has(c.uri) && !recent.has(c.uri) && !heard.has(songKey(c)) && (T.skips[c.uri] || 0) < 2 && sameLanguage(c);
+    return !Q.radioSeen.has(c.uri) && !recent.has(c.uri) && !heard.has(c) && (T.skips[c.uri] || 0) < 2 && sameLanguage(c);
   });
   const ctx = {
     sessionArtists: new Set(session.flatMap(artistKeys)),

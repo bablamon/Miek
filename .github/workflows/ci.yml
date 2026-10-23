@@ -33,6 +33,9 @@ jobs:
       - name: Autoplay language test
         run: node tests/autoplay_lang.mjs ui
 
+      - name: Explore "for you" test
+        run: node tests/foryou.mjs ui
+
       - name: Build
         run: cargo build --manifest-path src-tauri/Cargo.toml --locked
 

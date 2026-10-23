@@ -21,6 +21,9 @@ FILES = {
     b"Music\\Test Artist\\Songs\\02 - Song Two.flac": DATA,
     b"Music\\Test Artist\\Songs\\03 - Song Three.flac": DATA,
     b"Music\\Test Artist\\Songs\\01 - Test Tone.flac": DATA,
+    # credited with another artist in two folders: Explore's "Artists like Test Artist"
+    b"Music\\Test Artist\\Duets\\Test Artist, Other Singer - Duet.flac": DATA,
+    b"Music\\Collabs\\Test Artist & Other Singer - Second Duet.flac": DATA,
 }
 DENIED = b"Music\\Alice\\denied.flac"
 RATE = 600 * 1024

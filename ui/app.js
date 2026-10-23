@@ -258,7 +258,7 @@ function addToPlaylist(id, tracks) {
 }
 // one entry per song: another copy of the same song (another Soulseek user's, another source's)
 // replaces the older one. Only when the artist is known, so two different "Intro"s stay apart.
-const sameSong = (a, b) => a.uri === b.uri || (!!artistKeys(a).length && songKey(a) === songKey(b));
+const sameSong = (a, b) => a.uri === b.uri || (!!artistKeys(a).length && songSet([a]).has(b));
 function pushRecent(t) {
   LIB.data.recent = [slimTrack(t), ...LIB.data.recent.filter((x) => !sameSong(x, t))].slice(0, 40);
   libSave();
@@ -450,10 +450,10 @@ async function albumTracks(key) {
 const playAlbum = (key) => albumTracks(key).then((t) => playList(t)).catch(fail);
 
 // lazily filled shelf (archive requests)
-function lazyShelf(load) {
+function lazyShelf(load, empty = 'Nothing found here.') {
   const el = h('div', { class: 'shelf' }, Array.from({ length: 6 }, () => h('div', { class: 'card ghost-card' }, h('div', { class: 'cover' }), h('div', { class: 'ghost-line' }))));
   load()
-    .then((nodes) => el.replaceChildren(...(nodes.length ? nodes : [h('p', { class: 'fine', text: 'Nothing found here.' })])))
+    .then((nodes) => el.replaceChildren(...(nodes.length ? nodes : [h('p', { class: 'fine', text: empty })])))
     .catch(() => el.replaceChildren(h('p', { class: 'fine', text: 'The Internet Archive is unreachable right now.' })));
   return el;
 }
@@ -490,14 +490,19 @@ const VIEWS = {
     if (d.recent.length) out.append(section('Recently played'), shelf(d.recent.slice(0, 16).map((t) => card({ name: t.name, image: t.image, sub: names(t.artists) }, { onOpen: () => playOne(t), onPlay: () => playOne(t) }))));
     if (d.playlists.length) out.append(section('Your playlists'), shelf(d.playlists.map(playlistCard)));
     if (LOCAL.albums.length) out.append(section('From your music', h('a', { class: 'more lnk', text: 'Show all', onclick: () => go('library') })), shelf(shuffleArr(LOCAL.albums).slice(0, 16).map((a) => albumCard(localAlbumCard(a)))));
-    out.append(section('Live in lossless', h('a', { class: 'more lnk', text: 'Explore', onclick: () => go('explore') })), iaShelf('live'));
+    out.append(...homeForYou());
     return out;
   },
 
-  explore() {
-    const out = h('div', {},
-      h('div', { class: 'page-title', text: 'Explore' }),
-      h('p', { class: 'muted', style: 'max-width:560px;line-height:1.6', text: 'Lossless recordings from the Internet Archive — concerts, netlabels, public-domain and historic releases, streamed as FLAC (often 24-bit).' }));
+  // picked from what you listen to (foryou.js); a new listener gets the Archive's shelves
+  async explore() {
+    const out = h('div', {}, h('div', { class: 'page-title', text: 'Explore' }));
+    const mine = await exploreForYou();
+    if (mine) {
+      out.append(h('p', { class: 'muted', style: 'max-width:560px;line-height:1.6', text: 'Picked from what you listen to: more by your artists, similar artists, and more in your language. It changes as you listen.' }), mine);
+      return out;
+    }
+    out.append(h('p', { class: 'muted', style: 'max-width:560px;line-height:1.6', text: 'Lossless recordings from the Internet Archive — concerts, netlabels, public-domain and historic releases, streamed as FLAC (often 24-bit). Once you’ve played some music, this page is picked from what you listen to.' }));
     for (const [k, title] of SHELVES) out.append(section(title), iaShelf(k));
     return out;
   },
