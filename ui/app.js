@@ -273,15 +273,23 @@ function dedupeRecent() {
 const Q = { list: [], i: -1, shuffle: false, repeat: 0, seq: -1, radioSeen: new Set() };
 const current = () => Q.list[Q.i] || null;
 
-async function loadIndex(i, autoplay = true) {
+// Whether you want music playing: set by loading with autoplay and by Play/Pause. While it's true,
+// a loaded song that sits paused is started (see pollState): a loaded song always plays.
+const PLAY = { want: false, nudged: 0 };
+
+// advancing: reached by Next or the end of the previous song (not picked by you); a Soulseek file
+// that can't be had is then skipped instead of waited on
+async function loadIndex(i, autoplay = true, advancing = false) {
   const t = Q.list[i];
   if (!t) return;
   Q.i = i;
+  PLAY.want = autoplay;
+  t.reached = advancing;
   onTrackChange(t);
   try {
     if (t.slsk) {
       Q.seq = -1; // the previous track's end/error must not move the queue while we wait
-      if (S.player && S.player.status === 'playing') invoke('player_toggle').catch(() => {});
+      invoke('player_pause').catch(() => {}); // the previous song stops while this one is fetched
       const id = await slskPrepare(t);
       if (id == null) return;
       Q.seq = await invoke('player_load', { src: { kind: 'slsk', value: id }, autoplay });
@@ -293,8 +301,8 @@ async function loadIndex(i, autoplay = true) {
   } catch (e) {
     fail(e);
     if (t.slsk && current() === t) SL.failed = String(e).replace(/^Error:\s*/, '');
-    // a Soulseek file you picked stays put; an Autoplay pick that can't be had is skipped
-    if (t.slsk && t.radio) setTimeout(() => current() === t && next(true), 1500);
+    // a Soulseek file you picked stays put; one reached by Next, the end of a song or Autoplay is skipped
+    if (t.slsk && (t.radio || advancing)) setTimeout(() => current() === t && next(true), 1500);
   }
   prefetchNext();
   topUpAutoplay();
@@ -337,21 +345,25 @@ function queueAdd(tracks, next = false) {
   prefetchNext();
 }
 
+const NEXT = { finding: false };
 async function next(auto = false) {
   if (!current()) return;
+  const at0 = Q.i;
   // teach autoplay: finished (good), skipped early (bad), or listened a while
   const st = S.player;
   if (st && st.seq === Q.seq && st.status !== 'error') recordListen(current(), { ended: auto && st.status === 'ended', position: st.position || 0 });
-  if (auto && Q.repeat === 2) return loadIndex(Q.i);
-  if (Q.i + 1 < Q.list.length) return loadIndex(Q.i + 1);
-  if (Q.repeat === 1) return loadIndex(0);
-  // end of the queue: autoplay keeps the music going
+  if (auto && Q.repeat === 2) return loadIndex(Q.i, true, true);
+  if (Q.i + 1 < Q.list.length) return loadIndex(Q.i + 1, true, true);
+  if (Q.repeat === 1) return loadIndex(0, true, true);
+  // end of the queue: autoplay keeps the music going (finding songs can take a few seconds)
   if (autoplayOn()) {
     const at = Q.i;
-    await (REC.busy || topUpAutoplay());
-    if (Q.i === at && Q.i + 1 < Q.list.length) return loadIndex(Q.i + 1);
+    if (!auto) toast('Finding more songs…', 15000);
+    NEXT.finding = true;
+    try { await (REC.busy || topUpAutoplay()); } finally { NEXT.finding = false; }
+    if (Q.i === at && Q.i + 1 < Q.list.length) { $('toast').classList.add('hidden'); return loadIndex(Q.i + 1, true, true); }
   }
-  if (!auto) toast(autoplayOn() ? 'Nothing more to play' : 'End of the queue · Autoplay is off');
+  if (Q.i === at0) toast(autoplayOn() ? 'Autoplay found nothing more like this right now · pick something to play' : 'End of the queue · Autoplay is off', 6000);
 }
 function prev() {
   const s = S.player;
@@ -790,7 +802,12 @@ async function pollState() {
   const busy = s.status === 'playing' || s.status === 'loading';
   $('play').replaceChildren(icon(busy ? 'pause' : 'play', 20));
   $('play').title = busy ? 'Pause' : 'Play';
-  $('play').classList.toggle('loading', s.status === 'loading' || SL.waiting || (s.buffering && s.seq === Q.seq));
+  $('play').classList.toggle('loading', s.status === 'loading' || SL.waiting || NEXT.finding || (s.buffering && s.seq === Q.seq));
+  // a loaded song sitting paused while you want music: start it (e.g. a Play press landed while it loaded)
+  if (PLAY.want && Q.seq !== -1 && s.seq === Q.seq && s.status === 'paused' && Date.now() - PLAY.nudged > 1500) {
+    PLAY.nudged = Date.now();
+    invoke('player_toggle').catch(() => {});
+  }
   if (SL.waiting) $('play').title = 'Stop waiting';
   const cur0 = current();
   if (cur0 && cur0.slsk && SL.uri === cur0.uri && SL.id && !SL.waiting && (!SL.info || SL.info.state !== 'done')) {
@@ -846,7 +863,7 @@ async function pollState() {
     // never swap in another version: report it; a Soulseek file stays put so the user can pick another result
     if (s.status === 'error') {
       toast(`Couldn’t play “${cur ? cur.name : 'track'}”: ${s.error || 'unknown error'}`);
-      if (!(cur && cur.slsk) || cur.radio) setTimeout(() => next(true), 900);
+      if (!(cur && cur.slsk) || cur.radio || cur.reached) setTimeout(() => next(true), 900);
     } else next(true);
   }
 }
@@ -907,6 +924,8 @@ $('play').onclick = () => {
   if (slskCancelWait()) return;
   if (current() && Q.seq === -1) return loadIndex(Q.i); // try that Soulseek file again
   if (!current()) { const r = LIB.data.recent[0]; return r ? playOne(r) : toast('Pick something to play'); }
+  const st = S.player && S.player.status;
+  PLAY.want = !(st === 'playing' || st === 'loading');
   invoke('player_toggle').then(pollState).catch(fail);
 };
 $('next').onclick = () => next(false);

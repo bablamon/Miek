@@ -67,6 +67,8 @@ pub struct Info {
 enum Cmd {
     Load { src: Src, autoplay: bool, seq: u64 },
     Toggle,
+    /// pause if playing; never resumes or restarts (a toggle on a track that just ended restarts it)
+    Pause,
     Seek(f64),
 }
 
@@ -112,7 +114,7 @@ impl Player {
         match c {
             Cmd::Load { .. } => INTERRUPT.fetch_max(BY_LOAD, Ordering::SeqCst),
             Cmd::Seek(_) => INTERRUPT.fetch_max(BY_SEEK, Ordering::SeqCst),
-            Cmd::Toggle => 0,
+            Cmd::Toggle | Cmd::Pause => 0,
         };
         let _ = self.tx.lock().unwrap().send(c);
     }
@@ -142,6 +144,10 @@ pub fn player_load(p: tauri::State<'_, Player>, src: Src, autoplay: bool) -> u64
 #[tauri::command]
 pub fn player_toggle(p: tauri::State<'_, Player>) {
     p.send(Cmd::Toggle);
+}
+#[tauri::command]
+pub fn player_pause(p: tauri::State<'_, Player>) {
+    p.send(Cmd::Pause);
 }
 #[tauri::command]
 pub fn player_seek(p: tauri::State<'_, Player>, secs: f64) {
@@ -1082,6 +1088,13 @@ impl Engine {
                         }
                     }
                     _ => {}
+                }
+            }
+            Cmd::Pause => {
+                if matches!(self.info.lock().unwrap().status, "playing" | "loading") {
+                    self.want_play = false;
+                    self.cb.paused.store(true, Ordering::Relaxed);
+                    self.set(|i| i.status = "paused");
                 }
             }
             Cmd::Seek(secs) => {

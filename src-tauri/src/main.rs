@@ -22,6 +22,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             player::player_load,
             player::player_toggle,
+            player::player_pause,
             player::player_seek,
             player::player_volume,
             player::player_state,

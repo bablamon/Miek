@@ -106,7 +106,10 @@ kbd { font: 11px var(--sans); color: var(--ink-3); border: 1px solid var(--hair)
 .ibtn.on { color: var(--accent); }
 .ibtn.on::after { content: ""; position: absolute; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); transform: translateY(13px); }
 .ibtn.liked { color: var(--accent); }
-.ibtn.liked svg path { fill: currentColor; }
+/* the heart icon holds an outline and a filled heart: liked shows the filled one */
+.icon .i-on { display: none; }
+.liked .icon .i-on { display: inline; }
+.liked .icon .i-off { display: none; }
 
 /* ---------------------------------------------------------------- layout */
 #shell {
