@@ -530,16 +530,37 @@ impl StreamSource {
         let first = |u: &str| {
             let req = client.get(u);
             let req = if parallel { req.header("Range", format!("bytes=0-{}", FIRST_CHUNK - 1)) } else { req };
-            req.send().and_then(|r| r.error_for_status())
+            let r = req.send();
+            if std::env::var_os("MIEK_DEBUG_HTTP").is_some() {
+                if let Ok(resp) = &r {
+                    if !resp.status().is_success() {
+                        let q = u.split_once('?').map(|x| x.1).unwrap_or("");
+                        let keys: Vec<&str> = q.split('&').filter_map(|kv| kv.split('=').next()).collect();
+                        eprintln!("[miek http] {} for first request; params {:?}; response headers {:?}", resp.status(), keys, resp.headers());
+                    }
+                }
+            }
+            r.and_then(|r| r.error_for_status())
         };
-        let resp = match resolve(url) {
+        let mut resp = match resolve(url) {
             Some(direct) => first(&direct).or_else(|_| {
                 forget(url); // the item moved: ask archive.org again
                 first(url)
             }),
             None => first(url),
+        };
+        // Some YouTube links (from the TV client yt-dlp uses when Deno is installed) are refused for
+        // about 1.5 s after they're issued: on a 403, try again a few times before giving up
+        if is_youtube(url) {
+            for wait in [700u64, 800, 1000, 1500, 2000] {
+                if !matches!(&resp, Err(e) if e.status() == Some(reqwest::StatusCode::FORBIDDEN)) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(wait));
+                resp = first(url);
+            }
         }
-        .map_err(net_err)?;
+        let resp = resp.map_err(net_err)?;
         let final_url = resp.url().to_string();
         remember(url, &final_url);
         let total = (resp.status() == reqwest::StatusCode::PARTIAL_CONTENT)

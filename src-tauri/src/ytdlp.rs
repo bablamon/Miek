@@ -104,7 +104,8 @@ fn ensure() -> Result<PathBuf, String> {
 /// Run yt-dlp hidden; stdout on success, its last error line otherwise.
 fn run(args: &[&str], limit: Duration) -> Result<String, String> {
     let mut cmd = Command::new(exe());
-    cmd.args(["--ignore-config", "--no-warnings", "--socket-timeout", "15"]).args(args);
+    let debug = std::env::var_os("MIEK_DEBUG_HTTP").is_some();
+    cmd.args(["--ignore-config", "--socket-timeout", "15"]).args(if debug { &[][..] } else { &["--no-warnings"][..] }).args(args);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -123,6 +124,10 @@ fn run(args: &[&str], limit: Duration) -> Result<String, String> {
             return Err("yt-dlp took too long".into());
         }
     };
+    if debug {
+        eprintln!("[miek yt-dlp] {:?} → {:?}
+{}", args, out.status, String::from_utf8_lossy(&out.stderr));
+    }
     if out.status.success() {
         return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
     }
