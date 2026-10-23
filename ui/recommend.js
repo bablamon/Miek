@@ -278,9 +278,39 @@ function pickDiverse(scored, n, lastArtist) {
   return out;
 }
 
+// ----------------------------------------------------------------- YouTube Mix
+// After a YouTube song, Autoplay does what YouTube does: plays on through YouTube's Mix for the song you
+// picked, in YouTube's order (yt-dlp reads it), minus what you've just heard or keep skipping. When
+// that Mix runs out, it goes on from the newest YouTube song, so it drifts like YouTube's.
+const YT_MIX = new Map(); // video id → { at, list }
+async function youtubeMix(id) {
+  const c = YT_MIX.get(id);
+  if (c && Date.now() - c.at < 30 * 60e3) return c.list;
+  const list = (await invoke('yt_mix', { id })).map((v) => ({ ...ytTrack(v), mix: true }));
+  YT_MIX.set(id, { at: Date.now(), list });
+  return list;
+}
+async function mixPicks(session, n) {
+  const upto = Q.list.slice(0, Q.i + 1);
+  const picked = [...upto].reverse().find((t) => t.yt && !t.radio);
+  const newest = [...upto].reverse().find((t) => t.yt);
+  const T = taste();
+  const heard = songSet([...session, ...LIB.data.recent.slice(0, 25), ...Q.list.slice(Q.i + 1)]);
+  for (const seed of [...new Set([picked, newest])].filter(Boolean)) {
+    const mix = await youtubeMix(seed.yt.id).catch(() => []);
+    const picks = mix.filter((t) => !Q.radioSeen.has(t.uri) && !heard.has(t) && (T.skips[t.uri] || 0) < 2);
+    if (picks.length) return picks.slice(0, n);
+  }
+  return [];
+}
+
 async function recommend(n = 8) {
   const session = Q.list.slice(Math.max(0, Q.i - 4), Q.i + 1).filter(Boolean);
   if (!session.length) return [];
+  if (session[session.length - 1].yt) {
+    const mix = await mixPicks(session, n);
+    if (mix.length) return mix;
+  }
   const known = [...session, ...LIB.data.recent.slice(0, 50), ...LIB.data.liked];
   const lang = sessionLanguage(session, languages(known));
   const { candidates } = await gather(session, lang);
@@ -368,7 +398,7 @@ function autoplaySettings() {
   const favs = [...topKeys(T.artists, 3), ...topKeys(T.tags, 3)];
   return h('div', { class: 'panel' },
     h('div', { class: 'setting' },
-      h('div', {}, h('div', { class: 'label', text: 'Autoplay' }), h('div', { class: 'fine', text: 'When your queue ends, keep playing songs picked for you from your music, Soulseek (when it’s on), the Internet Archive and Wikimedia Commons.' })),
+      h('div', {}, h('div', { class: 'label', text: 'Autoplay' }), h('div', { class: 'fine', text: 'When your queue ends, keep playing: after a YouTube song, YouTube’s own Mix for it; otherwise songs picked for you from your music, Soulseek (when it’s on), the Internet Archive and Wikimedia Commons.' })),
       btn),
     h('div', { class: 'setting' },
       h('div', {}, h('div', { class: 'label', text: 'Your taste' }),

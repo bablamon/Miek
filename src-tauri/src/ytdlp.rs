@@ -173,18 +173,38 @@ pub async fn yt_search(query: String) -> Result<Vec<Video>, String> {
         ensure()?;
         // "ytsearch15:<query>" is one argument: a query can't be read as an option
         let out = run(&["--flat-playlist", "-J", &format!("ytsearch15:{q}")], Duration::from_secs(45))?;
-        let v: Value = serde_json::from_str(&out).map_err(|e| format!("yt-dlp answered something unexpected: {e}"))?;
-        Ok(v["entries"]
-            .as_array()
-            .map(|es| {
-                es.iter()
-                    .filter_map(|e| {
-                        let id = e["id"].as_str().filter(|id| valid_id(id))?.to_string();
-                        Some(Video { id, title: e["title"].as_str()?.to_string(), channel: e["channel"].as_str().or(e["uploader"].as_str()).map(str::to_string), duration: e["duration"].as_f64() })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default())
+        entries(&out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Videos from yt-dlp's flat-playlist JSON (a search or a playlist), in order.
+fn entries(out: &str) -> Result<Vec<Video>, String> {
+    let v: Value = serde_json::from_str(out).map_err(|e| format!("yt-dlp answered something unexpected: {e}"))?;
+    Ok(v["entries"]
+        .as_array()
+        .map(|es| {
+            es.iter()
+                .filter_map(|e| {
+                    let id = e["id"].as_str().filter(|id| valid_id(id))?.to_string();
+                    Some(Video { id, title: e["title"].as_str()?.to_string(), channel: e["channel"].as_str().or(e["uploader"].as_str()).map(str::to_string), duration: e["duration"].as_f64() })
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// YouTube's Mix for a video: what YouTube plays after it, in its order (without the video itself).
+#[tauri::command]
+pub async fn yt_mix(id: String) -> Result<Vec<Video>, String> {
+    if !valid_id(&id) {
+        return Err("Not a YouTube video id".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure()?;
+        let out = run(&["--flat-playlist", "-J", "--playlist-end", "30", &format!("https://www.youtube.com/watch?v={id}&list=RD{id}")], Duration::from_secs(45))?;
+        Ok(entries(&out)?.into_iter().filter(|v| v.id != id).collect())
     })
     .await
     .map_err(|e| e.to_string())?

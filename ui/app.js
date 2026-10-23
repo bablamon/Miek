@@ -1026,7 +1026,8 @@ function refreshQueue() {
   if (cur) block('Now playing', [{ t: cur, i: Q.i }]);
   const after = Q.list.slice(Q.i + 1).map((t, k) => ({ t, i: Q.i + 1 + k }));
   block('Next up', after.filter((x) => !x.t.radio));
-  block('Autoplay · picked for you', after.filter((x) => x.t.radio));
+  block('Autoplay · YouTube Mix', after.filter((x) => x.t.radio && x.t.mix));
+  block('Autoplay · picked for you', after.filter((x) => x.t.radio && !x.t.mix));
   if (!kids.length) kids.push(h('p', { class: 'fine', style: 'padding:10px', text: 'Play something to see what comes next. When the queue ends, Autoplay keeps going with songs picked for you.' }));
   $('queue-list').replaceChildren(...kids);
   markPlaying();

@@ -13,8 +13,16 @@ function ytNames(v) {
   const clean = v.title
     .replace(/\s*[([](official|lyrics?|lyrical|audio|video|full song|hd|4k|music video)[^)\]]*[)\]]/gi, '')
     .replace(/\s*@\S+/g, '')
+    .replace(/\s{2,}/g, ' ')
+    // YouTube labels around the song's name: "Full Video: …", "Lyrical: …", "… Full Video Song", "… Title Song FULL VIDEO"
+    .replace(/^\s*(full (video|song|audio)( song)?|lyrical( video)?|official (video|audio)|video|audio)\s*:\s*/i, '')
+    .replace(/\s+(full (video )?song( video)?|full (video|audio)|(official )?(lyrical|lyric|music) video|official (video|audio)|title (track|song)( full video)?|video song|with lyrics)\b/gi, '')
+    .replace(/["“”]/g, '')
+    .replace(/\s{2,}/g, ' ')
     .trim();
-  const parts = clean.split(/\s*\|\s*/).filter(Boolean);
+  // "Galliyan Song": a label only on film-song uploads ("Love Song" stays a song name)
+  const labelled = /full (video|song|audio)|lyrical|video song|title (track|song)/i.test(v.title);
+  const parts = clean.split(/\s*\|\s*/).map((p) => (labelled ? p.replace(/\s+song$/i, '') : p)).filter(Boolean);
   const dash = parts[0] && parts[0].match(/^(.+?)\s+[-–]\s+(.+)$/);
   // usually "Artist - Song"; "Song - Artist" when the second half is an artist you listen to and the first isn't
   const known = (s) => typeof LIB !== 'undefined' && [...LIB.data.recent, ...LIB.data.liked].some((t) => (t.artists || []).some((a) => norm(a.name) === norm(s)));
