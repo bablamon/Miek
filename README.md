@@ -88,6 +88,7 @@ The tag message becomes the release notes in the pop-up.
 | `src-tauri/src/commons.rs` | Wikimedia Commons FLAC music search (with format + licence) |
 | `src-tauri/src/library.rs` | likes / playlists / history storage |
 | `ui/` | interface (plain HTML/CSS/JS, no framework) |
+| `ui/tap.js` | tap sounds on button presses (made with Web Audio, no sound file) |
 | `ui/soulseek.js` | Soulseek UI: results (filters, sorting), playing a chosen file, downloads, settings |
 | `ui/foryou.js` | Explore and Home picked from what you listen to; similar artists |
 | `ui/recommend.js` | Autoplay: taste profile, candidates, scoring, language, queue top-up |

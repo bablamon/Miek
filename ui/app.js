@@ -650,6 +650,7 @@ const VIEWS = {
 
     const soundBtn = h('button', { class: 'btn' }, introPrefs.sound ? 'On' : 'Off');
     soundBtn.onclick = () => { introPrefs.sound = !introPrefs.sound; soundBtn.textContent = introPrefs.sound ? 'On' : 'Off'; };
+    out.append(section('Sounds'), tapSettings());
     out.append(section('Opening'), h('div', { class: 'panel' },
       h('div', { class: 'setting' }, h('div', {}, h('div', { class: 'label', text: 'Intro beat' }), h('div', { class: 'fine', text: 'Play the drum groove with the opening animation.' })), soundBtn),
       h('div', { class: 'setting' }, h('div', {}, h('div', { class: 'label', text: 'Replay intro' })), h('button', { class: 'btn', onclick: () => playIntro() }, 'Play'))));
