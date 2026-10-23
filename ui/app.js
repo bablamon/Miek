@@ -40,7 +40,9 @@ function toast(msg, ms = 2600) {
   toast.t = setTimeout(() => t.classList.add('hidden'), ms);
 }
 // errors stay up long enough to read
-const fail = (e) => toast(String(e).replace(/^Error:\s*/, '').slice(0, 200), 6000);
+// an error for the user: no links (YouTube's carry your IP address), and readable length
+const plain = (e) => String(e).replace(/^Error:\s*/, '').replace(/\s*\(?for url \(?https?:\/\/\S+/gi, '').replace(/https?:\/\/\S+/g, '(link)').slice(0, 200);
+const fail = (e) => toast(plain(e), 6000);
 
 function img(src) {
   const i = h('img', { alt: '', loading: 'lazy' });
@@ -901,8 +903,15 @@ async function pollState() {
     S.handledSeq = s.seq;
     const cur = current();
     // never swap in another version: report it; a Soulseek file stays put so the user can pick another result
+    // YouTube refused the link (it was for another IP address, or expired): get a fresh one, once
+    if (s.status === 'error' && cur && cur.yt && !cur.retried && /40[0-9]|410|forbidden|gone/i.test(s.error || '')) {
+      cur.retried = true;
+      cur.fresh = true;
+      loadIndex(Q.i, true, cur.reached);
+      return;
+    }
     if (s.status === 'error') {
-      toast(`Couldn’t play “${cur ? cur.name : 'track'}”: ${s.error || 'unknown error'}`);
+      toast(`Couldn’t play “${cur ? cur.name : 'track'}”: ${plain(s.error || 'unknown error')}`);
       if (!(cur && cur.slsk) || cur.radio || cur.reached) setTimeout(() => next(true), 900);
     } else next(true);
   }

@@ -19,14 +19,27 @@ function ytNames(v) {
     .replace(/\s+(full (video )?song( video)?|full (video|audio)|(official )?(lyrical|lyric|music) video|official (video|audio)|title (track|song)( full video)?|video song|with lyrics)\b/gi, '')
     .replace(/["“”]/g, '')
     .replace(/\s{2,}/g, ' ')
+    // a label taken out of "A - OFFICIAL VIDEO - B" leaves "A - - B"; one at the end leaves "A -"
+    .replace(/(\s+[-–])+\s+(?=[-–]\s)/g, ' ')
+    .replace(/(\s+[-–])+\s*$/, '')
     .trim();
   // "Galliyan Song": a label only on film-song uploads ("Love Song" stays a song name)
-  const labelled = /full (video|song|audio)|lyrical|video song|title (track|song)/i.test(v.title);
+  const labelled = /full (video|song|audio)|lyrical|video song|title (track|song)|song with lyrics/i.test(v.title);
   const parts = clean.split(/\s*\|\s*/).map((p) => (labelled ? p.replace(/\s+song$/i, '') : p)).filter(Boolean);
-  const dash = parts[0] && parts[0].match(/^(.+?)\s+[-–]\s+(.+)$/);
-  // usually "Artist - Song"; "Song - Artist" when the second half is an artist you listen to and the first isn't
-  const known = (s) => typeof LIB !== 'undefined' && [...LIB.data.recent, ...LIB.data.liked].some((t) => (t.artists || []).some((a) => norm(a.name) === norm(s)));
-  if (dash) return known(dash[2]) && !known(dash[1]) ? { name: dash[1], artist: dash[2] } : { name: dash[2], artist: dash[1] };
+  const first = (parts[0] || '').replace(/\s+[-–]\s+official\s+(video|remix|audio|song)$/i, '');
+  const dash = first.match(/^(.+?)\s+[-–]\s+(.+)$/);
+  if (dash) {
+    const [, a, b] = dash;
+    if (/^by\s+/i.test(b)) return { name: a, artist: b.replace(/^by\s+/i, '') }; // "Song - By Artist"
+    // usually "Artist - Song"; it's "Song - Artist" when the second half lists names ("A, B" / "A & B")
+    // and the first doesn't, the first carries a version note "(Original Remix …)", the second is the
+    // channel, or the second is an artist you listen to and the first isn't
+    const known = (s) => typeof LIB !== 'undefined' && [...LIB.data.recent, ...LIB.data.liked].some((t) => (t.artists || []).some((x) => norm(x.name) === norm(s)));
+    const list = (s) => /,|\s&\s|\s+and\s+/i.test(s);
+    const ch = norm(ytArtist(v.channel || ''));
+    const songFirst = (list(b) && !list(a)) || (/[([]/.test(a) && !/[([]/.test(b)) || (!!ch && (norm(b).includes(ch) || ch.includes(norm(b)))) || (known(b) && !known(a));
+    return songFirst ? { name: a, artist: b } : { name: b, artist: a };
+  }
   const name = parts.find((p) => !p.includes(',')) || parts[0] || v.title;
   return { name, artist: ytArtist(v.channel) };
 }
@@ -65,7 +78,8 @@ function youtubeResults(term) {
 
 // a YouTube track's stream link (resolved when it plays; cached for a few hours by the backend)
 async function ytStream(t) {
-  const s = await invoke('yt_resolve', { id: t.yt.id });
+  const s = await invoke('yt_resolve', { id: t.yt.id, fresh: !!t.fresh }); // fresh: the last link was refused
+  t.fresh = false;
   if (s.duration && !t.duration) t.duration = s.duration * 1000;
   return { kind: 'url', value: s.url };
 }

@@ -370,17 +370,27 @@ pub(crate) fn trim_cache() {
 /// One client for the whole app: its connection pool keeps TLS connections alive between requests.
 fn http_client() -> reqwest::blocking::Client {
     static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| client_builder().build().expect("http client")).clone()
+}
+fn client_builder() -> reqwest::blocking::ClientBuilder {
+    reqwest::blocking::Client::builder()
+        .user_agent(concat!("Miek/", env!("CARGO_PKG_VERSION"), " (open-source music player)"))
+        .connect_timeout(Duration::from_secs(15))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_nodelay(true)
+}
+/// For YouTube: over IPv4 only. Its links only work from the IP address that asked for them, and
+/// yt-dlp asks over IPv4 (--force-ipv4); on a connection with both IPv4 and IPv6 the download could
+/// otherwise go out over IPv6 and be refused (403).
+fn youtube_client() -> reqwest::blocking::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
     CLIENT
-        .get_or_init(|| {
-            reqwest::blocking::Client::builder()
-                .user_agent(concat!("Miek/", env!("CARGO_PKG_VERSION"), " (open-source music player)"))
-                .connect_timeout(Duration::from_secs(15))
-                .pool_idle_timeout(Duration::from_secs(90))
-                .tcp_nodelay(true)
-                .build()
-                .expect("http client")
-        })
+        .get_or_init(|| client_builder().local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)).build().expect("http client"))
         .clone()
+}
+/// A network error for the user: what went wrong, without the link (YouTube's carry your IP address).
+fn net_err(e: reqwest::Error) -> String {
+    format!("Network error: {}", e.without_url())
 }
 
 // archive.org/download/<item>/… redirects to the storage server holding the item; remember it per item
@@ -493,7 +503,7 @@ impl StreamSource {
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let path = cache_path(url);
         let done_marker = path.with_extension("done");
-        let client = http_client();
+        let client = if is_youtube(url) { youtube_client() } else { http_client() };
 
         // fully cached already: play from disk
         if done_marker.exists() {
@@ -529,7 +539,7 @@ impl StreamSource {
             }),
             None => first(url),
         }
-        .map_err(|e| format!("Network error: {e}"))?;
+        .map_err(net_err)?;
         let final_url = resp.url().to_string();
         remember(url, &final_url);
         let total = (resp.status() == reqwest::StatusCode::PARTIAL_CONTENT)
@@ -537,7 +547,7 @@ impl StreamSource {
             .flatten();
 
         let resp = if total.is_none() && resp.status() == reqwest::StatusCode::PARTIAL_CONTENT {
-            client.get(&final_url).send().and_then(|r| r.error_for_status()).map_err(|e| format!("Network error: {e}"))?
+            client.get(&final_url).send().and_then(|r| r.error_for_status()).map_err(net_err)?
         } else {
             resp
         };
@@ -616,11 +626,11 @@ impl StreamSource {
                 .header("Range", format!("bytes={}-{end}", self.pos))
                 .send()
                 .and_then(|r| r.error_for_status())
-                .map_err(std::io::Error::other)?;
+                .map_err(|e| std::io::Error::other(net_err(e)))?;
             if r.status() != reqwest::StatusCode::PARTIAL_CONTENT {
                 return Err(std::io::Error::other("server ignored range request"));
             }
-            self.side = r.bytes().map_err(std::io::Error::other)?.to_vec();
+            self.side = r.bytes().map_err(|e| std::io::Error::other(net_err(e)))?.to_vec();
             self.side_start = self.pos;
             if self.side.is_empty() {
                 return Ok(0);

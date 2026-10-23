@@ -221,18 +221,22 @@ pub struct Stream {
 // resolved links last ~6 h; keep them a while so replays and Next/Previous don't ask again
 static RESOLVED: Mutex<Vec<(String, Stream, SystemTime)>> = Mutex::new(Vec::new());
 
-/// The video's AAC audio link, for the player.
+/// The video's AAC audio link, for the player. `fresh`: ask YouTube again (the last link was refused).
 #[tauri::command]
-pub async fn yt_resolve(id: String) -> Result<Stream, String> {
+pub async fn yt_resolve(id: String, fresh: Option<bool>) -> Result<Stream, String> {
     if !valid_id(&id) {
         return Err("Not a YouTube video id".into());
+    }
+    if fresh.unwrap_or(false) {
+        RESOLVED.lock().unwrap().retain(|(i, _, _)| *i != id);
     }
     if let Some(s) = RESOLVED.lock().unwrap().iter().find(|(i, _, at)| *i == id && at.elapsed().unwrap_or_default() < Duration::from_secs(3 * 3600)).map(|(_, s, _)| s.clone()) {
         return Ok(s);
     }
     tauri::async_runtime::spawn_blocking(move || {
         ensure()?;
-        let out = run(&["-f", FORMAT, "-j", "--no-playlist", &format!("https://www.youtube.com/watch?v={id}")], Duration::from_secs(60))?;
+        // IPv4: the link is tied to the asking address, and the player streams it over IPv4 too
+        let out = run(&["-f", FORMAT, "-j", "--no-playlist", "--force-ipv4", &format!("https://www.youtube.com/watch?v={id}")], Duration::from_secs(60))?;
         let v: Value = serde_json::from_str(&out).map_err(|e| format!("yt-dlp answered something unexpected: {e}"))?;
         let url = v["url"].as_str().filter(|u| u.starts_with("https://")).ok_or("YouTube didn't give an audio stream Miek can play for this video")?.to_string();
         let s = Stream { url, duration: v["duration"].as_f64(), bitrate: v["abr"].as_f64() };
