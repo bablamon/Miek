@@ -303,7 +303,8 @@ async function loadIndex(i, autoplay = true, advancing = false) {
         // a YouTube video: its stream link is resolved now (a few seconds; links expire)
         Q.seq = -1;
         invoke('player_pause').catch(() => {});
-        src = await ytStream(t);
+        YT.resolving = t; // the player bar shows it's getting the stream
+        try { src = await ytStream(t); } finally { if (YT.resolving === t) YT.resolving = null; }
         if (current() !== t) return; // moved on meanwhile
       }
       Q.seq = await invoke('player_load', { src, autoplay });
@@ -767,6 +768,7 @@ function trackMenu(e, t, i, opts, row) {
     { icon: 'heart', text: isLiked(t.uri) ? 'Remove from Liked songs' : 'Add to Liked songs', run: () => toggleLike(t) },
     { icon: 'plus', text: 'Add to playlist…', run: () => playlistPicker(e, [t]) },
     t.slsk ? { icon: 'download', text: 'Download to your music', run: () => slskDownload(t) } : null,
+    t.yt ? { icon: 'download', text: 'Download to your music', run: () => ytDownload(t) } : null,
     ...(opts.extraMenu ? opts.extraMenu(t, i) : []),
     '-',
     t.album ? { icon: 'disc', text: 'Go to album', run: () => go('album', t.album.key) } : null,
@@ -844,7 +846,8 @@ async function pollState() {
   const busy = s.status === 'playing' || s.status === 'loading';
   $('play').replaceChildren(icon(busy ? 'pause' : 'play', 20));
   $('play').title = busy ? 'Pause' : 'Play';
-  $('play').classList.toggle('loading', s.status === 'loading' || SL.waiting || NEXT.finding || (s.buffering && s.seq === Q.seq));
+  const ytWait = !!YT.resolving && YT.resolving === current();
+  $('play').classList.toggle('loading', s.status === 'loading' || SL.waiting || ytWait || NEXT.finding || (s.buffering && s.seq === Q.seq));
   // a loaded song sitting paused while you want music: start it (e.g. a Play press landed while it loaded)
   if (PLAY.want && Q.seq !== -1 && s.seq === Q.seq && s.status === 'paused' && Date.now() - PLAY.nudged > 1500) {
     PLAY.nudged = Date.now();
@@ -876,7 +879,11 @@ async function pollState() {
   // source format → output, e.g. "FLAC 24/96 → 48"
   const qb = $('quality');
   const slskNow = cur0 && cur0.slsk && SL.uri === cur0.uri ? SL.info : null;
-  if (SL.waiting && slskNow) {
+  if (ytWait) {
+    qb.textContent = 'YouTube · getting the stream…';
+    qb.title = 'Asking YouTube for this song’s audio (a few seconds)';
+    qb.classList.remove('hidden');
+  } else if (SL.waiting && slskNow) {
     qb.textContent = slskStateText(slskNow);
     qb.title = `Soulseek · ${cur0.slsk.file}`;
     qb.classList.remove('hidden');

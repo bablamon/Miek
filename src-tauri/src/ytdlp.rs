@@ -240,9 +240,7 @@ pub async fn yt_resolve(id: String, fresh: Option<bool>) -> Result<Stream, Strin
     }
     tauri::async_runtime::spawn_blocking(move || {
         ensure()?;
-        // IPv4: the link is tied to the asking address, and the player streams it over IPv4 too
-        let out = run(&["-f", FORMAT, "-j", "--no-playlist", "--force-ipv4", &format!("https://www.youtube.com/watch?v={id}")], Duration::from_secs(60))?;
-        let v: Value = serde_json::from_str(&out).map_err(|e| format!("yt-dlp answered something unexpected: {e}"))?;
+        let v = audio_info(&id)?;
         let url = v["url"].as_str().filter(|u| u.starts_with("https://")).ok_or("YouTube didn't give an audio stream Miek can play for this video")?.to_string();
         let s = Stream { url, duration: v["duration"].as_f64(), bitrate: v["abr"].as_f64() };
         let mut r = RESOLVED.lock().unwrap();
@@ -252,6 +250,92 @@ pub async fn yt_resolve(id: String, fresh: Option<bool>) -> Result<Stream, Strin
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// yt-dlp's info for the video's AAC audio. First without a JavaScript runtime: faster, and its links
+/// work at once; with one (Deno, if installed) the TV client's links are refused for ~1.5 s. If that
+/// way finds nothing, ask again the default way. IPv4: the link is tied to the asking address, and
+/// the player streams it over IPv4 too.
+fn audio_info(id: &str) -> Result<Value, String> {
+    let url = format!("https://www.youtube.com/watch?v={id}");
+    let ask = |extra: &[&str]| -> Result<Value, String> {
+        let mut args = vec!["-f", FORMAT, "-j", "--no-playlist", "--force-ipv4"];
+        args.extend_from_slice(extra);
+        args.push(&url);
+        let out = run(&args, Duration::from_secs(60))?;
+        let v: Value = serde_json::from_str(&out).map_err(|e| format!("yt-dlp answered something unexpected: {e}"))?;
+        v["url"].as_str().filter(|u| u.starts_with("https://")).ok_or("no audio stream")?;
+        Ok(v)
+    };
+    ask(&["--no-js-runtimes"]).or_else(|_| ask(&[]))
+}
+
+#[derive(Serialize)]
+pub struct Saved {
+    folder: String,
+    path: String,
+}
+
+/// Save a video's audio into Music\Miek YouTube (AAC in .m4a, as streamed), with its title, artist
+/// and thumbnail written into the file so it shows properly in your music.
+#[tauri::command]
+pub async fn yt_download(id: String, title: String, artist: String) -> Result<Saved, String> {
+    if !valid_id(&id) {
+        return Err("Not a YouTube video id".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure()?;
+        let home = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        let folder = home.join("Music").join("Miek YouTube");
+        std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+        let dir = folder.to_string_lossy().into_owned();
+        let url = format!("https://www.youtube.com/watch?v={id}");
+        let get = |extra: &[&str]| -> Result<String, String> {
+            let mut args = vec!["-f", FORMAT, "--no-playlist", "--force-ipv4", "--no-progress", "-P", dir.as_str(), "-o", "%(title).120B [%(id)s].%(ext)s", "--print", "after_move:filepath"];
+            args.extend_from_slice(extra);
+            args.push(&url);
+            let out = run(&args, Duration::from_secs(600))?;
+            out.lines().rev().find(|l| !l.trim().is_empty()).map(|l| l.trim().to_string()).ok_or_else(|| "yt-dlp didn't say where it saved the file".to_string())
+        };
+        let printed = get(&["--no-js-runtimes"]).or_else(|_| get(&[]))?;
+        // the printed path can come back garbled (a title with characters outside the console's code
+        // page), so the file is also looked up by the "[id]" in its name
+        let tag = format!("[{id}].");
+        let path = Some(printed).filter(|p| PathBuf::from(p).exists()).or_else(|| {
+            std::fs::read_dir(&folder).ok()?.flatten().map(|e| e.path()).find(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.contains(&tag) && !n.ends_with(".part"))).map(|p| p.to_string_lossy().into_owned())
+        }).ok_or("The download didn't produce a file")?;
+        tag_download(&path, &title, &artist, &id);
+        Ok(Saved { folder: folder.to_string_lossy().into_owned(), path })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Title, artist and the video's thumbnail as cover, written into the downloaded .m4a (best effort).
+fn tag_download(path: &str, title: &str, artist: &str, id: &str) {
+    use lofty::config::WriteOptions;
+    use lofty::picture::{MimeType, Picture, PictureType};
+    use lofty::prelude::*;
+    use lofty::tag::Tag;
+    let Ok(mut file) = lofty::read_from_path(path) else { return };
+    let kind = file.primary_tag_type();
+    if file.primary_tag_mut().is_none() {
+        file.insert_tag(Tag::new(kind));
+    }
+    let Some(tag) = file.primary_tag_mut() else { return };
+    if !title.trim().is_empty() {
+        tag.set_title(title.trim().to_string());
+    }
+    if !artist.trim().is_empty() {
+        tag.set_artist(artist.trim().to_string());
+    }
+    let cover = http().ok().and_then(|c| {
+        ["maxresdefault", "hqdefault"].iter().find_map(|q| c.get(format!("https://i.ytimg.com/vi/{id}/{q}.jpg")).send().ok().filter(|r| r.status().is_success()).and_then(|r| r.bytes().ok()))
+    });
+    if let Some(jpg) = cover {
+        tag.push_picture(Picture::unchecked(jpg.to_vec()).pic_type(PictureType::CoverFront).mime_type(MimeType::Jpeg).build());
+    }
+    let _ = file.save_to_path(path, WriteOptions::default());
 }
 
 /// Update yt-dlp now (Settings).

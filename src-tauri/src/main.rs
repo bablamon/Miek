@@ -57,6 +57,7 @@ fn main() {
             ytdlp::yt_search,
             ytdlp::yt_resolve,
             ytdlp::yt_mix,
+            ytdlp::yt_download,
             ytdlp::yt_update
         ])
         .run(tauri::generate_context!())

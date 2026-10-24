@@ -2,7 +2,7 @@
 // A video's audio link expires after some hours, so only the video id is kept (likes, history,
 // playlists); the link is resolved when it plays. Loaded after app.js; uses its globals.
 
-const YT = { first: true };
+const YT = { first: true, resolving: null, saving: new Set() };
 // "Artist - Topic" channels are YouTube's auto-made music channels; "VEVO" ones belong to an artist
 const ytArtist = (channel) => (channel || 'YouTube').replace(/\s*-\s*Topic$/i, '').replace(/VEVO$/, '').trim() || channel;
 // The song and artist from a video title:
@@ -70,7 +70,14 @@ function youtubeResults(term) {
     const st = await invoke('yt_status');
     if (!st.installed) box.replaceChildren(h('p', { class: 'fine', text: 'Getting yt-dlp (one time, about 18 MB)…' }));
     const list = (await invoke('yt_search', { query: term })).map(ytTrack);
-    box.replaceChildren(list.length ? trackList(list, (i) => playOne(list[i])) : h('p', { class: 'fine', text: 'Nothing found on YouTube.' }));
+    const rows = list.length ? trackList(list, (i) => playOne(list[i])) : h('p', { class: 'fine', text: 'Nothing found on YouTube.' });
+    // the pointer resting on a result: get its stream link already, so a double-click starts at once
+    [...rows.querySelectorAll('.trow')].forEach((row, i) => {
+      let timer = null;
+      row.addEventListener('mouseenter', () => { timer = setTimeout(() => invoke('yt_resolve', { id: list[i].yt.id }).catch(() => {}), 350); });
+      row.addEventListener('mouseleave', () => clearTimeout(timer));
+    });
+    box.replaceChildren(rows);
     markPlaying();
   })().catch((e) => box.replaceChildren(h('p', { class: 'fine', text: `YouTube: ${String(e).replace(/^Error:\s*/, '')}` })));
   return box;
@@ -82,6 +89,24 @@ async function ytStream(t) {
   t.fresh = false;
   if (s.duration && !t.duration) t.duration = s.duration * 1000;
   return { kind: 'url', value: s.url };
+}
+
+// "Download to your music": the AAC audio saved into Music\Miek YouTube with its title, artist and
+// cover written in; that folder becomes one of your music folders
+async function ytDownload(t) {
+  if (YT.saving.has(t.yt.id)) return toast('Already downloading that song');
+  YT.saving.add(t.yt.id);
+  toast(`Downloading “${t.name}” from YouTube…`, 6000);
+  try {
+    const saved = await invoke('yt_download', { id: t.yt.id, title: t.name, artist: names(t.artists) });
+    if (!LOCAL.folders.includes(saved.folder)) {
+      LOCAL.folders = [...LOCAL.folders, saved.folder];
+      await invoke('local_set_folders', { folders: LOCAL.folders });
+    }
+    toast(`Saved “${t.name}” to your music`);
+    rescan();
+  } catch (e) { fail(e); }
+  YT.saving.delete(t.yt.id);
 }
 
 function youtubeSettings() {
